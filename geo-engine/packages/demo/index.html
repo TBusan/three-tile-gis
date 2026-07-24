@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GeoEngine Demo — Checkerboard Tile Verification</title>
+  <title>GeoEngine Demo — OSM Basemap + Multi-Layer</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; }
@@ -20,6 +20,7 @@
       display: block;
       position: absolute;
       top: 0; left: 0;
+      width: 100%; height: 100%;
     }
     #panel {
       position: absolute;
@@ -38,7 +39,6 @@
 </head>
 <body>
   <div id="app">
-    <canvas id="map"></canvas>
     <div id="panel">
       <div>CRS: <span id="crs-name">—</span></div>
       <div>Center: <span id="crs-pos">—</span></div>

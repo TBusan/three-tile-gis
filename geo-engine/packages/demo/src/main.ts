@@ -1,18 +1,23 @@
 /**
- * GeoEngine Phase 1 Demo — Checkerboard Tile Verification
+ * GeoEngine Phase 2 Demo — OSM Basemap + Checkerboard Overlay
  *
- * 验证整个引擎骨架：
- *   CGCS2000GKCRS → ProjectTileScheme → RasterLayer
- *   → TileManager → TileScheduler → Engine → Camera
- *
- * 不使用 Three.js，直接用 Canvas 2D 绘制 tile 以证明管线跑通。
+ * 验证：
+ *   1. XYZ 瓦片加载（OSM 底图）通过 XYZTileScheme → XYZTileSource → RasterRenderer
+ *   2. 多图层叠加（底图 + 棋盘格 overlay）
+ *   3. Three.js WebGL 渲染管线
+ *   4. CGCS2000 GK 38 带投影
  */
 
+import * as THREE from "three";
 import {
   Engine,
   CGCS2000GKCRS,
+  WebMercatorCRS,
   RasterLayer,
   ProjectTileScheme,
+  XYZTileScheme,
+  XYZTileSource,
+  RasterRenderer,
   MapCameraController,
   type Tile,
   type IDataSource,
@@ -26,7 +31,9 @@ import {
   RenderObject,
 } from "@geo-engine/core";
 
-// ── Checkerboard Data ─────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// Data source: Checkerboard (same as Phase 1, but returns color only)
+// ═══════════════════════════════════════════════════════════════
 
 interface CheckerTileData {
   color: string;
@@ -45,26 +52,20 @@ class CheckerboardSource implements IDataSource<CheckerTileData> {
 
   async fetch(
     key: TileKey,
-    _tileBounds: CrsBounds,
-    _signal?: AbortSignal,
   ): Promise<CheckerTileData> {
     const [col, row] = key.id.split("-").map(Number);
     const isDark = (col + row) % 2 === 0;
-    return {
-      color: isDark ? "#2a3f5f" : "#3a5f7f",
-      row,
-      col,
-    };
+    return { color: isDark ? "#2a3f5f" : "#3a5f7f", row, col };
   }
 
-  dispose(_data: CheckerTileData): void {}
+  dispose(): void {}
 }
 
-// ── Canvas Renderer ───────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// Renderer: Checkerboard → THREE.Mesh with colored material
+// ═══════════════════════════════════════════════════════════════
 
-class CheckerboardRenderer
-  implements ILayerRenderer<CheckerTileData>
-{
+class CheckerboardRenderer implements ILayerRenderer<CheckerTileData> {
   readonly name = "checkerboard-renderer";
 
   async createContent(
@@ -76,105 +77,47 @@ class CheckerboardRenderer
       tile.key,
       "cb-layer",
     );
+
+    const [xmin, ymin, xmax, ymax] = tile.bounds;
+    const width = xmax - xmin;
+    const height = ymax - ymin;
+
+    const geometry = new THREE.PlaneGeometry(width, height);
+    const cx = (xmin + xmax) / 2 - tile.origin.x;
+    const cy = (ymin + ymax) / 2 - tile.origin.y;
+    geometry.translate(cx, cy, 0);
+
+    const material = new THREE.MeshBasicMaterial({
+      color: new THREE.Color(data.color),
+      side: THREE.DoubleSide,
+      transparent: true,
+      opacity: 0.65,
+    });
+
+    const mesh = new THREE.Mesh(geometry, material);
+
+    const ro = new RenderObject(mesh, (obj: unknown) => {
+      const m = obj as THREE.Mesh;
+      m.geometry.dispose();
+      if (Array.isArray(m.material)) {
+        for (const mat of m.material) mat.dispose();
+      } else {
+        m.material.dispose();
+      }
+    });
+
+    content.renderObjects.push(ro);
     content.data = data;
     content.state = "ready";
-
-    const ro = new RenderObject(
-      {
-        bounds: tile.bounds,
-        color: data.color,
-        row: data.row,
-        col: data.col,
-        origin: tile.origin,
-      },
-      () => {}, // no GPU disposal needed
-    );
-    content.renderObjects.push(ro);
     return content;
   }
 
-  disposeContent(_content: TileContent): void {}
+  disposeContent(): void {}
 }
 
-// ── Drawing ───────────────────────────────────────────────────
-
-function drawTiles(
-  ctx: CanvasRenderingContext2D,
-  tiles: ReadonlyMap<string, Tile>,
-  camera: CrsCoord,
-  zoom: number,
-  w: number,
-  h: number,
-) {
-  ctx.fillStyle = "#1a1a2e";
-  ctx.fillRect(0, 0, w, h);
-
-  for (const tile of tiles.values()) {
-    if (tile.state !== "loaded" && tile.state !== "visible") continue;
-    if (tile.contents.length === 0) continue;
-    const content = tile.contents[0];
-    if (content.renderObjects.length === 0) continue;
-
-    const roData = content.renderObjects[0].object as {
-      bounds: CrsBounds;
-      color: string;
-      row: number;
-      col: number;
-    };
-    const [xmin, ymin, xmax, ymax] = roData.bounds;
-
-    // CRS → screen
-    const sx0 = (xmin - camera.x) / zoom + w / 2;
-    const sy0 = -(ymax - camera.y) / zoom + h / 2;
-    const sx1 = (xmax - camera.x) / zoom + w / 2;
-    const sy1 = -(ymin - camera.y) / zoom + h / 2;
-
-    const tw = sx1 - sx0;
-    const th = sy1 - sy0;
-
-    // Cull offscreen
-    if (sx1 < 0 || sx0 > w || sy1 < 0 || sy0 > h) continue;
-
-    ctx.fillStyle = roData.color;
-    ctx.fillRect(sx0, sy0, tw, th);
-    ctx.strokeStyle = "rgba(255,255,255,0.12)";
-    ctx.lineWidth = 1;
-    ctx.strokeRect(sx0, sy0, tw, th);
-
-    // Label
-    if (tw > 40 && th > 20) {
-      ctx.fillStyle = "rgba(255,255,255,0.5)";
-      ctx.font = "11px monospace";
-      ctx.textAlign = "center";
-      ctx.textBaseline = "middle";
-      ctx.fillText(
-        `${roData.col},${roData.row}`,
-        sx0 + tw / 2,
-        sy0 + th / 2,
-      );
-    }
-  }
-
-  // Crosshair
-  drawCrosshair(ctx, w, h);
-}
-
-function drawCrosshair(
-  ctx: CanvasRenderingContext2D,
-  w: number,
-  h: number,
-) {
-  ctx.strokeStyle = "rgba(255,255,255,0.25)";
-  ctx.lineWidth = 1;
-  ctx.beginPath();
-  ctx.moveTo(w / 2 - 16, h / 2);
-  ctx.lineTo(w / 2 + 16, h / 2);
-  ctx.moveTo(w / 2, h / 2 - 16);
-  ctx.lineTo(w / 2, h / 2 + 16);
-  ctx.stroke();
-}
-
-// ── HUD ───────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// HUD
+// ═══════════════════════════════════════════════════════════════
 
 function updateHUD(
   crsName: string,
@@ -190,49 +133,90 @@ function updateHUD(
   el("tile-count").textContent = `${tileCount}`;
 }
 
-// ── Main ───────────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════
+// Main
+// ═══════════════════════════════════════════════════════════════
 
 async function main() {
   const crs = new CGCS2000GKCRS(38);
   const app = document.getElementById("app")!;
-  const canvas = document.getElementById("map") as HTMLCanvasElement;
 
-  // Sizing
+  // ── Three.js setup ──────────────────────────────────────────
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setClearColor(0x1a1a2e);
+  app.appendChild(renderer.domElement);
+
+  const scene = new THREE.Scene();
+
+  // Orthographic camera: top-down 2D view
+  const frustumSize = 2000; // default zoom in meters
+  const camera = new THREE.OrthographicCamera();
+  camera.position.z = 100;
+  camera.lookAt(0, 0, 0);
+
+  // Crosshair
+  const crosshair = createCrosshair();
+  scene.add(crosshair);
+
+  // ── Sizing ─────────────────────────────────────────────────
   function size() {
-    const dpr = window.devicePixelRatio;
     const cw = app.clientWidth;
     const ch = app.clientHeight;
-    canvas.width = cw * dpr;
-    canvas.height = ch * dpr;
-    canvas.style.width = cw + "px";
-    canvas.style.height = ch + "px";
+    renderer.setSize(cw, ch, false);
+
+    const aspect = cw / ch;
+    camera.left = (-frustumSize * aspect) / 2;
+    camera.right = (frustumSize * aspect) / 2;
+    camera.top = frustumSize / 2;
+    camera.bottom = -frustumSize / 2;
+    camera.near = 0.1;
+    camera.far = 1e6;
+    camera.updateProjectionMatrix();
   }
   size();
   window.addEventListener("resize", size);
 
-  const ctx = canvas.getContext("2d")!;
+  // ── Layers ─────────────────────────────────────────────────
+  // Layer 1: OSM basemap (XYZTileScheme)
+  const osmScheme = new XYZTileScheme(crs, 0, 18);
+  const osmSource = new XYZTileSource(
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    { minZoom: 0, maxZoom: 18 },
+  );
+  const osmRenderer = new RasterRenderer({ name: "osm-renderer" });
 
-  // Build components
-  const scheme = new ProjectTileScheme(500);
-  const source = new CheckerboardSource(crs);
-  const renderer = new CheckerboardRenderer();
-
-  const layer = new RasterLayer({
-    name: "Checkerboard",
-    tileScheme: scheme,
-    dataSource: source,
-    renderer,
+  const osmLayer = new RasterLayer({
+    name: "OSM Basemap",
+    tileScheme: osmScheme,
+    dataSource: osmSource,
+    renderer: osmRenderer,
     zIndex: 0,
   });
 
-  // Tile load callback
-  const tileLoadFn: TileLoadCallback = async (tile, _layer, signal) => {
+  // Layer 2: Checkerboard overlay (ProjectTileScheme)
+  const checkerScheme = new ProjectTileScheme(1000);
+  const checkerSource = new CheckerboardSource(crs);
+  const checkerRenderer = new CheckerboardRenderer();
+
+  const checkerLayer = new RasterLayer({
+    name: "Checkerboard",
+    tileScheme: checkerScheme,
+    dataSource: checkerSource,
+    renderer: checkerRenderer,
+    zIndex: 10,
+  });
+
+  // ── Tile load callback ─────────────────────────────────────
+  const tileLoadFn: TileLoadCallback = async (tile, layer, signal) => {
+    const source = layer.dataSource;
+    const renderer = layer.renderer;
     const data = await source.fetch(tile.key, tile.bounds, signal);
     if (signal.aborted) return null;
     return renderer.createContent(data, tile);
   };
 
-  // Engine
+  // ── Engine ─────────────────────────────────────────────────
   const engine = new Engine({
     crs,
     container: app,
@@ -243,7 +227,7 @@ async function main() {
         name: "Default",
         visible: true,
         opacity: 1,
-        layers: [layer],
+        layers: [osmLayer, checkerLayer],
       },
     ],
     cameraController: new MapCameraController({
@@ -253,29 +237,88 @@ async function main() {
     }),
   });
 
-  // Start engine (its own rAF manages tile loading)
   engine.start();
 
-  // Separate rendering loop — reads Engine state, draws canvas
+  // ── Scene sync ─────────────────────────────────────────────
+  // 跟踪已添加到场景的 tile mesh
+  const sceneTiles = new Map<string, THREE.Group>();
+
+  function syncScene() {
+    const loaded = engine.tileManager.loadedTiles;
+    const origin = engine.floatingOrigin.current;
+
+    // 添加新 tile
+    for (const [key, tile] of loaded) {
+      if (sceneTiles.has(key)) continue;
+      if (tile.contents.length === 0) continue;
+
+      const group = new THREE.Group();
+      let hasMeshes = false;
+
+      for (const content of tile.contents) {
+        for (const ro of content.renderObjects) {
+          if (ro.object instanceof THREE.Mesh) {
+            // Take ownership — move mesh from RenderObject to scene group
+            group.add(ro.object);
+            hasMeshes = true;
+          }
+        }
+      }
+
+      if (!hasMeshes) continue;
+
+      // 定位 group 于 tile origin（局部坐标 = CRS - floating origin）
+      group.position.set(
+        tile.origin.x - origin.x,
+        tile.origin.y - origin.y,
+        0,
+      );
+
+      scene.add(group);
+      sceneTiles.set(key, group);
+    }
+
+    // 移除淘汰的 tile（GPU 资源已由 Tile.dispose 释放，此处只从场景移除）
+    for (const [key, group] of sceneTiles) {
+      if (!loaded.has(key)) {
+        scene.remove(group);
+        sceneTiles.delete(key);
+      }
+    }
+  }
+
+  // ── Render loop ────────────────────────────────────────────
   function render() {
-    const dpr = window.devicePixelRatio;
+    const cam = engine.cameraController as MapCameraController;
+    const origin = engine.floatingOrigin.current;
+
+    // Update ortho camera frustum to match map zoom
     const cw = app.clientWidth;
     const ch = app.clientHeight;
+    const aspect = cw / ch;
+    const halfH = cam.zoom * ch / 2;
+    const halfW = halfH * aspect;
 
-    const cam = engine.cameraController as MapCameraController;
+    camera.left = -halfW;
+    camera.right = halfW;
+    camera.top = halfH;
+    camera.bottom = -halfH;
+    camera.updateProjectionMatrix();
 
-    ctx.save();
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    drawTiles(
-      ctx,
-      engine.tileManager.loadedTiles,
-      cam.cameraWorldPos,
-      cam.zoom,
-      cw,
-      ch,
+    // Move camera to follow map position (in floating-origin space)
+    camera.position.set(
+      cam.cameraWorldPos.x - origin.x,
+      cam.cameraWorldPos.y - origin.y,
+      camera.position.z,
     );
-    ctx.restore();
 
+    // Sync tile meshes
+    syncScene();
+
+    // Render
+    renderer.render(scene, camera);
+
+    // HUD
     updateHUD(
       crs.name,
       cam.cameraWorldPos.x,
@@ -288,6 +331,32 @@ async function main() {
   }
 
   requestAnimationFrame(render);
+}
+
+// ═══════════════════════════════════════════════════════════════
+// Helpers
+// ═══════════════════════════════════════════════════════════════
+
+function createCrosshair(): THREE.Line {
+  const size = 16;
+  const material = new THREE.LineBasicMaterial({
+    color: 0xffffff,
+    transparent: true,
+    opacity: 0.25,
+  });
+
+  const hPoints = [new THREE.Vector3(-size, 0, 0), new THREE.Vector3(size, 0, 0)];
+  const vPoints = [new THREE.Vector3(0, -size, 0), new THREE.Vector3(0, size, 0)];
+
+  const hGeo = new THREE.BufferGeometry().setFromPoints(hPoints);
+  const vGeo = new THREE.BufferGeometry().setFromPoints(vPoints);
+
+  const group = new THREE.Group();
+  group.add(new THREE.Line(hGeo, material));
+  group.add(new THREE.Line(vGeo, material));
+  group.position.z = 90; // just below camera
+
+  return group as unknown as THREE.Line; // Group extends Object3D, cast for return type
 }
 
 main();

@@ -5,5 +5,6 @@ export { Tile } from "./Tile";
 export { TileContent, RenderObject } from "./TileContent";
 export { type ITileScheme } from "./ITileScheme";
 export { ProjectTileScheme } from "./ProjectTileScheme";
+export { XYZTileScheme } from "./XYZTileScheme";
 export { type ITileCache } from "./ITileCache";
 export { LRUTileCache } from "./LRUTileCache";
