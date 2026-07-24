@@ -1,5 +1,5 @@
 /**
- * GeoEngine Phase 5 Demo — OSM Basemap (SubdividedPlane) + Checkerboard + Vector Overlay
+ * GeoEngine Phase 6 Demo — OSM Basemap + Checkerboard + Vector Overlay
  *
  * 验证：
  *   1. XYZ 瓦片加载（OSM 底图）通过 XYZTileScheme → XYZTileSource → RasterRenderer
@@ -9,7 +9,8 @@
  *   5. Multi-level LOD（缩放时 tile 级别自动切换）
  *   6. VectorRenderer 支持 Point / LineString / Polygon
  *   7. SubdividedPlane 细分网格提升 XYZ→GCJ38 重投影精度
- *   8. Proj4CRS 支持任意 EPSG 代码
+ *   8. Proj4CRS / UTMCRS / CustomCRS 多 CRS 支持
+ *   9. DEMSource + DemMesh + SkirtedMesh 地形就绪
  */
 
 import * as THREE from "three";
@@ -18,6 +19,8 @@ import {
   CGCS2000GKCRS,
   WebMercatorCRS,
   Proj4CRS,
+  UTMCRS,
+  CustomCRS,
   RasterLayer,
   VectorLayer,
   ProjectTileScheme,
@@ -25,10 +28,13 @@ import {
   XYZTileSource,
   GeoJSONSource,
   GeoTIFFSource,
+  DEMSource,
   RasterRenderer,
   VectorRenderer,
   DefaultMaterialFactory,
   SubdividedPlane,
+  DemMesh,
+  SkirtedMesh,
   MapCameraController,
   type Tile,
   type IDataSource,
@@ -378,6 +384,26 @@ async function main() {
   //   renderer: geoTiffRenderer,
   //   zIndex: 5,
   // });
+
+  // ── DEM + Terrain Example (commented out — requires DEM .tif file) ─
+  // const demSource = new DEMSource({ url: "/data/dem.tif", crs });
+  // const demScheme = new ProjectTileScheme(500);
+  //
+  // // Build elevation sampler from DEM data:
+  // //   const demData = await demSource.fetch(key, bounds);
+  // //   const sampler = (x: number, y: number) => bilinearSample(demData, ...)
+  //
+  // // Flat terrain with DemMesh:
+  // // const demRenderer = new RasterRenderer({
+  // //   name: "dem-renderer",
+  // //   quality: new DemMesh(sampler, 4),
+  // // });
+  //
+  // // With LOD crack prevention (SkirtedMesh):
+  // // const demRenderer = new RasterRenderer({
+  // //   name: "dem-renderer",
+  // //   quality: new SkirtedMesh(sampler, 4, 100),
+  // // });
 
   // ── Tile load callback ─────────────────────────────────────
   const tileLoadFn: TileLoadCallback = async (tile, layer, signal) => {

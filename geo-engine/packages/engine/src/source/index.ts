@@ -7,3 +7,4 @@ export { DXFSource, type DXFEntity } from "./DXFSource";
 export { PointCloudSource, type PointCloudEntity } from "./PointCloudSource";
 export { GPRSource, type VoxelGrid } from "./GPRSource";
 export { GeoTIFFSource, type GeoTIFFSourceOptions } from "./GeoTIFFSource";
+export { DEMSource, type DEMSourceOptions } from "./DEMSource";
