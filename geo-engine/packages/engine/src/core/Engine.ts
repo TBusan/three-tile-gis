@@ -114,6 +114,64 @@ export class Engine {
     this.layerManager.clear();
   }
 
+  // ---- Coordinate conversion (§11) ----
+
+  /**
+   * CRS 坐标 → World 坐标（减 Floating Origin）
+   *
+   * 用于将 CRS 空间坐标转换为场景局部坐标。
+   * 所有 Tile Group 的 position 都用此方法计算。
+   */
+  crsToWorld(coord: CrsCoord): { x: number; y: number; z: number } {
+    return {
+      x: coord.x - this.floatingOrigin.current.x,
+      y: coord.y - this.floatingOrigin.current.y,
+      z: coord.z,
+    };
+  }
+
+  /**
+   * World 坐标 → CRS 坐标（加 Floating Origin）
+   *
+   * 用于将场景局部坐标转换回 CRS 空间坐标。
+   */
+  worldToCrs(world: { x: number; y: number; z: number }): CrsCoord {
+    return {
+      x: world.x + this.floatingOrigin.current.x,
+      y: world.y + this.floatingOrigin.current.y,
+      z: world.z,
+    };
+  }
+
+  /**
+   * 屏幕像素坐标 → CRS 空间坐标
+   *
+   * 使用正交相机参数做反向映射，用于鼠标点击拾取等场景。
+   *
+   * @param camera — 正交相机 frustum（left, right, top, bottom）
+   * @param pointer — 屏幕像素坐标 (0, 0 = 左上角)
+   * @param containerWidth — 容器宽度（像素）
+   * @param containerHeight — 容器高度（像素）
+   */
+  screenToCrs(
+    camera: { left: number; right: number; top: number; bottom: number },
+    pointer: { x: number; y: number },
+    containerWidth: number,
+    containerHeight: number,
+  ): CrsCoord {
+    // 屏幕 → NDC: [0, w]×[0, h] → [-1, 1]×[-1, 1]（Y 翻转 = NDC y-up）
+    const ndcX = (pointer.x / containerWidth) * 2 - 1;
+    const ndcY = -(pointer.y / containerHeight) * 2 + 1;
+
+    // NDC → World: 线性映射
+    const worldX =
+      camera.left + ((ndcX + 1) / 2) * (camera.right - camera.left);
+    const worldY =
+      camera.bottom + ((ndcY + 1) / 2) * (camera.top - camera.bottom);
+
+    return this.worldToCrs({ x: worldX, y: worldY, z: 0 });
+  }
+
   // ---- private ----
 
   private _tick = (): void => {

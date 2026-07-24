@@ -78,43 +78,41 @@ export class TileManager {
     layers: ILayer[],
     resolution?: number,
   ): void {
+    // 0. 按依赖拓扑排序图层（无依赖的先处理）
+    const sorted = this._sortByDeps(layers);
+
     // 1. 收集候选 TileKey → layerIds（按 key 合并）
     const keyToLayerIds = new Map<string, { key: TileKey; layerIds: Set<string>; bounds: CrsBounds }>();
-    for (const layer of layers) {
+    for (const layer of sorted) {
       const keys = layer.getVisibleTiles(extent, crs, resolution);
+
+      // 如果该图层有依赖，检查依赖图层的同 key tile 是否已加载
+      if (layer.dependsOn.length > 0) {
+        const allDepKeys = new Set<string>();
+        for (const dep of layer.dependsOn) {
+          if (!sorted.includes(dep)) continue;
+          const depKeys = dep.getVisibleTiles(extent, crs, resolution);
+          for (const dk of depKeys) {
+            allDepKeys.add(tileKeyToString(dk));
+          }
+        }
+        // 只保留依赖已就绪的 tile key（依赖 tile 已 loaded）
+        const ready = keys.filter((k) => {
+          const strK = tileKeyToString(k);
+          // 检查同 key 的依赖 tile 是否已 loaded
+          return allDepKeys.has(strK) && this._loadedTiles.has(strK);
+        });
+        // 跳过不满足依赖的 tile，下次帧重试
+        if (ready.length === 0) continue;
+        // 继续用 ready 列表处理（只处理依赖就绪的）
+        for (const key of ready) {
+          this._addKeyRequest(key, layer, keyToLayerIds);
+        }
+        continue;
+      }
+
       for (const key of keys) {
-        const strKey = tileKeyToString(key);
-
-        // 已在加载中 → 追加 layerId
-        if (this._loading.has(strKey)) {
-          this._loading.get(strKey)!.layerIds.add(layer.id);
-          continue;
-        }
-
-        // 已在缓存或 loaded → 更新访问时间
-        if (this._loadedTiles.has(strKey)) {
-          const tile = this._loadedTiles.get(strKey)!;
-          tile.lastAccessTime = Date.now();
-          continue;
-        }
-        if (this.cache.has(strKey)) {
-          const tile = this.cache.get(strKey)!;
-          this._loadedTiles.set(strKey, tile);
-          tile.lastAccessTime = Date.now();
-          continue;
-        }
-
-        // 新请求 → 合并 layerIds
-        if (keyToLayerIds.has(strKey)) {
-          keyToLayerIds.get(strKey)!.layerIds.add(layer.id);
-        } else {
-          const bounds = layer.tileScheme.getTileBounds(key);
-          keyToLayerIds.set(strKey, {
-            key,
-            layerIds: new Set([layer.id]),
-            bounds,
-          });
-        }
+        this._addKeyRequest(key, layer, keyToLayerIds);
       }
     }
 
@@ -246,6 +244,66 @@ export class TileManager {
   }
 
   // ---- private ----
+
+  /** 拓扑排序图层列表：无依赖的优先，依赖其他图层的在后 */
+  private _sortByDeps(layers: ILayer[]): ILayer[] {
+    const visited = new Set<string>();
+    const result: ILayer[] = [];
+
+    const visit = (layer: ILayer) => {
+      if (visited.has(layer.id)) return;
+      visited.add(layer.id);
+      for (const dep of layer.dependsOn) {
+        if (layers.includes(dep)) visit(dep);
+      }
+      result.push(layer);
+    };
+
+    for (const layer of layers) visit(layer);
+    return result;
+  }
+
+  /** 将单个 tile key 注册到待请求集合 */
+  private _addKeyRequest(
+    key: TileKey,
+    layer: ILayer,
+    keyToLayerIds: Map<string, { key: TileKey; layerIds: Set<string>; bounds: CrsBounds }>,
+  ): void {
+    const strKey = tileKeyToString(key);
+
+    // 已在加载中 → 追加 layerId
+    if (this._loading.has(strKey)) {
+      this._loading.get(strKey)!.layerIds.add(layer.id);
+      return;
+    }
+
+    // 已在缓存或 loaded → 更新访问时间；但若该 layer 尚无 content 仍需发起请求
+    if (this._loadedTiles.has(strKey)) {
+      const tile = this._loadedTiles.get(strKey)!;
+      tile.lastAccessTime = Date.now();
+      if (tile.contents.some((c) => c.layerId === layer.id)) return;
+      // 该 layer 未贡献 content 到已存在的 tile，继续添加请求
+    }
+    if (this.cache.has(strKey)) {
+      const tile = this.cache.get(strKey)!;
+      this._loadedTiles.set(strKey, tile);
+      tile.lastAccessTime = Date.now();
+      if (tile.contents.some((c) => c.layerId === layer.id)) return;
+      // 该 layer 未贡献 content，继续添加请求
+    }
+
+    // 新请求 → 合并 layerIds
+    if (keyToLayerIds.has(strKey)) {
+      keyToLayerIds.get(strKey)!.layerIds.add(layer.id);
+    } else {
+      const bounds = layer.tileScheme.getTileBounds(key);
+      keyToLayerIds.set(strKey, {
+        key,
+        layerIds: new Set([layer.id]),
+        bounds,
+      });
+    }
+  }
 
   private async _loadTile(
     req: LoadRequest,

@@ -223,6 +223,143 @@ describe("TileManager", () => {
     );
   });
 
+  it("should skip dependent layer tiles when dependency not loaded", async () => {
+    const loadedCalls: Array<{ layerId: string; keyId: string }> = [];
+    const mgr = new TileManager(cache, origin, async (_tile, layer, _signal) => {
+      loadedCalls.push({ layerId: layer.id, keyId: _tile.key.id });
+      const { TileContent } = await import("../../tile/TileContent");
+      return new TileContent(`tc`, _tile.key, layer.id);
+    });
+
+    const key = makeTileKey("proj", "0-0", 0);
+    const scheme = makeMockScheme("proj");
+
+    // Layer A (dependency) — no dependsOn
+    const layerA: ILayer = {
+      id: "A",
+      name: "Layer A",
+      type: "raster",
+      visible: true,
+      opacity: 1,
+      zIndex: 0,
+      tileScheme: scheme,
+      dataSource: {
+        dataType: "test",
+        crs: mockCRS,
+        bounds: [0, 0, 10000, 10000] as CrsBounds,
+        fetch: async () => null,
+        dispose: () => {},
+      },
+      renderer: {
+        name: "test",
+        createContent: async () => null,
+        disposeContent: () => {},
+      },
+      dependsOn: [],
+      getVisibleTiles: () => [key],
+    };
+
+    // Layer B depends on A — needs A's tile loaded first
+    const layerB: ILayer = {
+      ...layerA,
+      id: "B",
+      name: "Layer B",
+      dependsOn: [layerA],
+    };
+
+    // First frame: request both layers. A should load, B should skip.
+    mgr.update(
+      [-1000, -1000, 1000, 1000],
+      { x: 0, y: 0, z: 0 },
+      mockCRS,
+      [layerA, layerB],
+    );
+
+    // Let the loads resolve
+    await vi.waitFor(
+      () => expect(mgr.loadedTiles.size).toBeGreaterThan(0),
+      { timeout: 1000 },
+    );
+
+    // A's tile should be loaded, B's should have been skipped
+    const tile = mgr.loadedTiles.values().next().value as Tile;
+    expect(tile.contents.some((c) => c.layerId === "A")).toBe(true);
+    // B was skipped (dependency not ready on first pass)
+    expect(loadedCalls.filter((c) => c.layerId === "A").length).toBe(1);
+  });
+
+  it("should load dependent layer tile once dependency tile is ready", async () => {
+    const loadedCalls: Array<{ layerId: string; keyId: string }> = [];
+    const mgr = new TileManager(cache, origin, async (_tile, layer, _signal) => {
+      loadedCalls.push({ layerId: layer.id, keyId: _tile.key.id });
+      const { TileContent } = await import("../../tile/TileContent");
+      return new TileContent(`tc`, _tile.key, layer.id);
+    });
+
+    const key = makeTileKey("proj", "0-0", 0);
+    const scheme = makeMockScheme("proj");
+
+    const layerA: ILayer = {
+      id: "A",
+      name: "Layer A",
+      type: "raster",
+      visible: true,
+      opacity: 1,
+      zIndex: 0,
+      tileScheme: scheme,
+      dataSource: {
+        dataType: "test",
+        crs: mockCRS,
+        bounds: [0, 0, 10000, 10000] as CrsBounds,
+        fetch: async () => null,
+        dispose: () => {},
+      },
+      renderer: {
+        name: "test",
+        createContent: async () => null,
+        disposeContent: () => {},
+      },
+      dependsOn: [],
+      getVisibleTiles: () => [key],
+    };
+
+    const layerB: ILayer = {
+      ...layerA,
+      id: "B",
+      name: "Layer B",
+      dependsOn: [layerA],
+    };
+
+    // First frame — A loads
+    mgr.update(
+      [-1000, -1000, 1000, 1000],
+      { x: 0, y: 0, z: 0 },
+      mockCRS,
+      [layerA, layerB],
+    );
+
+    await vi.waitFor(
+      () => expect(mgr.loadedTiles.size).toBeGreaterThan(0),
+      { timeout: 1000 },
+    );
+
+    // Second frame — now A is loaded, B should load
+    const beforeCount = loadedCalls.length;
+    mgr.update(
+      [-1000, -1000, 1000, 1000],
+      { x: 0, y: 0, z: 0 },
+      mockCRS,
+      [layerA, layerB],
+    );
+
+    // Wait for async loads to complete
+    await new Promise((r) => setTimeout(r, 300));
+
+    const tile = mgr.loadedTiles.values().next().value as Tile;
+    expect(tile.contents.some((c) => c.layerId === "A")).toBe(true);
+    expect(tile.contents.some((c) => c.layerId === "B")).toBe(true);
+  });
+
   it("should dispose all tiles on dispose", async () => {
     const mgr = new TileManager(cache, origin, async (tile, _layer, _signal) => {
       const { TileContent } = await import("../../tile/TileContent");

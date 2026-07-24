@@ -1,5 +1,5 @@
 /**
- * GeoEngine Phase 8 Demo — OSM Basemap + Checkerboard + Vector Overlay
+ * GeoEngine Phase 9 Demo — OSM Basemap + Checkerboard + Vector Overlay
  *
  * 验证：
  *   1. XYZ 瓦片加载（OSM 底图）通过 XYZTileScheme → XYZTileSource → RasterRenderer
@@ -16,6 +16,9 @@
  *  12. 300ms 淡入过渡动画
  *  13. WorkerPool 共享 Web Worker 池（GeoTIFF 解码卸载）
  *  14. DXFSource 入口预留（stub）
+ *  15. Engine crsToWorld / worldToCrs / screenToCrs 坐标转换
+ *  16. TileManager Layer dependsOn 依赖排序
+ *  17. CODE_OF_CONDUCT.md + npm publish 配置
  */
 
 import * as THREE from "three";

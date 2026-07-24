@@ -112,4 +112,79 @@ describe("Engine", () => {
       (globalThis as any).cancelAnimationFrame = origCAF;
     }
   });
+
+  // ── Coordinate conversion tests ────────────────────────────────
+
+  it("crsToWorld should return coord minus floating origin", () => {
+    const container = { clientWidth: 800, clientHeight: 600 } as HTMLElement;
+    const engine = new Engine({
+      crs: new CGCS2000GKCRS(38),
+      container,
+      tileLoadFn: async () => null,
+    });
+
+    // At start, floating origin is {0, 0, 0}
+    const world = engine.crsToWorld({ x: 500000, y: 3650000, z: 100 });
+    expect(world.x).toBe(500000);
+    expect(world.y).toBe(3650000);
+    expect(world.z).toBe(100);
+  });
+
+  it("worldToCrs should return coord plus floating origin", () => {
+    const container = { clientWidth: 800, clientHeight: 600 } as HTMLElement;
+    const engine = new Engine({
+      crs: new CGCS2000GKCRS(38),
+      container,
+      tileLoadFn: async () => null,
+    });
+
+    const crs = engine.worldToCrs({ x: 100, y: 200, z: 10 });
+    expect(crs.x).toBe(100);
+    expect(crs.y).toBe(200);
+    expect(crs.z).toBe(10);
+  });
+
+  it("screenToCrs center of screen → center of frustum", () => {
+    const container = { clientWidth: 800, clientHeight: 600 } as HTMLElement;
+    const engine = new Engine({
+      crs: new CGCS2000GKCRS(38),
+      container,
+      tileLoadFn: async () => null,
+    });
+
+    const camera = { left: -400, right: 400, top: 300, bottom: -300 };
+    const result = engine.screenToCrs(
+      camera,
+      { x: 400, y: 300 }, // center of 800×600
+      800,
+      600,
+    );
+
+    // Center of screen → center of frustum → (0, 0) in world
+    // worldToCrs(0, 0, 0) with origin {0, 0, 0} → {0, 0, 0}
+    expect(result.x).toBeCloseTo(0, 1);
+    expect(result.y).toBeCloseTo(0, 1);
+  });
+
+  it("crsToWorld round-trip with worldToCrs", () => {
+    const container = { clientWidth: 800, clientHeight: 600 } as HTMLElement;
+    const engine = new Engine({
+      crs: new CGCS2000GKCRS(38),
+      container,
+      tileLoadFn: async () => null,
+    });
+
+    const original: { x: number; y: number; z: number } = {
+      x: 500000,
+      y: 3650000,
+      z: 123.45,
+    };
+
+    const world = engine.crsToWorld(original);
+    const back = engine.worldToCrs(world);
+
+    expect(back.x).toBe(original.x);
+    expect(back.y).toBe(original.y);
+    expect(back.z).toBe(original.z);
+  });
 });
