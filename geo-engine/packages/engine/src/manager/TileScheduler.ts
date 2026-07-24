@@ -9,8 +9,9 @@ import { tileKeyToString } from "../tile/TileKey";
  */
 export interface LoadRequest {
   tileKey: TileKey;
-  layerId: string;
-  /** CrsCoord of the camera position — only used for distance computation */
+  /** All layers that need this tile (merged by TileKey for sharing) */
+  layerIds: string[];
+  /** Distance to camera (meters) */
   distanceToCamera: number;
   /** 屏幕面积占比 (0–1)，越大越优先 */
   screenArea: number;
@@ -70,11 +71,23 @@ export class TileScheduler {
   /** 取消一个 tile 的加载 */
   abort(tileKey: TileKey): void {
     const key = tileKeyToString(tileKey);
-    const controller = this._loading.get(key);
+    this.abortByKey(key);
+  }
+
+  /** 通过字符串 key 取消加载 */
+  abortByKey(strKey: string): void {
+    const controller = this._loading.get(strKey);
     if (controller) {
       controller.abort();
-      this._loading.delete(key);
+      this._loading.delete(strKey);
     }
+  }
+
+  /** 清除不在可见集合中的队列条目 */
+  cancelOffscreen(visibleKeys: Set<string>): void {
+    this._queue = this._queue.filter((req) =>
+      visibleKeys.has(tileKeyToString(req.tileKey)),
+    );
   }
 
   /** 取消所有正在加载的 tile */
@@ -124,10 +137,9 @@ export class TileScheduler {
   }
 
   /** 标记一个 tile 开始加载 */
-  startLoading(tileKey: TileKey, signal: AbortSignal): void {
+  startLoading(tileKey: TileKey, controller: AbortController): void {
     const key = tileKeyToString(tileKey);
-    // 存一个引用以便 abort
-    this._loading.set(key, signal as any);
+    this._loading.set(key, controller);
   }
 
   get queueLength(): number {

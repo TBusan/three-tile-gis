@@ -42,6 +42,8 @@ export class TileContent extends Disposable {
   renderObjects: RenderObject[] = [];
   /** 内容状态 */
   state: ContentState;
+  /** 创建时间戳（用于淡入动画，performance.now() 毫秒） */
+  readonly createdAt: number;
 
   constructor(id: string, tileKey: TileKey, layerId: string) {
     super();
@@ -49,6 +51,7 @@ export class TileContent extends Disposable {
     this.tileKey = tileKey;
     this.layerId = layerId;
     this.state = "pending" as ContentState;
+    this.createdAt = performance.now();
   }
 
   dispose(): void {

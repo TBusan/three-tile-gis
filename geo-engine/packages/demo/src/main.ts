@@ -1,5 +1,5 @@
 /**
- * GeoEngine Phase 6 Demo — OSM Basemap + Checkerboard + Vector Overlay
+ * GeoEngine Phase 7 Demo — OSM Basemap + Checkerboard + Vector Overlay
  *
  * 验证：
  *   1. XYZ 瓦片加载（OSM 底图）通过 XYZTileScheme → XYZTileSource → RasterRenderer
@@ -11,6 +11,9 @@
  *   7. SubdividedPlane 细分网格提升 XYZ→GCJ38 重投影精度
  *   8. Proj4CRS / UTMCRS / CustomCRS 多 CRS 支持
  *   9. DEMSource + DemMesh + SkirtedMesh 地形就绪
+ *  10. TileScheduler 4D 优先级 + 渐进式父 Tile 显示
+ *  11. 瓦片共享（同 key 多层） + 离屏加载取消
+ *  12. 300ms 淡入过渡动画
  */
 
 import * as THREE from "three";
@@ -142,12 +145,15 @@ function updateHUD(
   y: number,
   zoom: number,
   tileCount: number,
+  queueLen: number,
+  loadingCount: number,
 ) {
   const el = (id: string) => document.getElementById(id)!;
   el("crs-name").textContent = crsName;
   el("crs-pos").textContent = `(${x.toFixed(0)}, ${y.toFixed(0)}) m`;
   el("crs-zoom").textContent = `${zoom.toFixed(1)} m/px`;
   el("tile-count").textContent = `${tileCount}`;
+  el("scheduler-stats").textContent = `${queueLen} queued / ${loadingCount} loading`;
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -474,6 +480,19 @@ async function main() {
 
       scene.add(group);
       sceneTiles.set(key, group);
+
+      // 设置初始 opacity = 0（淡入动画起点）
+      group.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          const mat = child.material as THREE.Material;
+          if ("opacity" in mat && "transparent" in mat) {
+            (mat as THREE.MeshBasicMaterial).opacity = 0;
+            mat.transparent = true;
+          }
+        }
+      });
+      // 存储 content 引用用于淡入动画
+      (group as any).__fadeContent = tile.contents[0];
     }
 
     // 移除淘汰的 tile（GPU 资源已由 Tile.dispose 释放，此处只从场景移除）
@@ -516,6 +535,33 @@ async function main() {
     // Render
     renderer.render(scene, camera);
 
+    // ── Fade-in animation (300ms) ─────────────────────────
+    const FADE_DURATION = 300;
+    const now = performance.now();
+    for (const [, group] of sceneTiles) {
+      const content = (group as any).__fadeContent;
+      if (!content) continue;
+      const elapsed = now - content.createdAt;
+      if (elapsed >= FADE_DURATION) {
+        // Fully visible — remove fade tracking
+        delete (group as any).__fadeContent;
+        group.traverse((child) => {
+          if (child instanceof THREE.Mesh) {
+            const mat = child.material as THREE.MeshBasicMaterial;
+            if ("opacity" in mat) mat.opacity = 1;
+          }
+        });
+        continue;
+      }
+      const opacity = Math.min(1, elapsed / FADE_DURATION);
+      group.traverse((child) => {
+        if (child instanceof THREE.Mesh) {
+          const mat = child.material as THREE.MeshBasicMaterial;
+          if ("opacity" in mat) mat.opacity = opacity;
+        }
+      });
+    }
+
     // HUD
     updateHUD(
       crs.name,
@@ -523,6 +569,8 @@ async function main() {
       cam.cameraWorldPos.y,
       cam.zoom,
       engine.tileManager.loadedTiles.size,
+      engine.tileManager.scheduler.queueLength,
+      engine.tileManager.scheduler.loadingCount,
     );
 
     requestAnimationFrame(render);

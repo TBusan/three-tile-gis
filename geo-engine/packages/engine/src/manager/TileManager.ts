@@ -5,7 +5,6 @@ import type { IProjectCRS } from "../crs/IProjectCRS";
 import type { TileKey } from "../tile/TileKey";
 import { tileKeyToString } from "../tile/TileKey";
 import { Tile } from "../tile/Tile";
-import { TileContent } from "../tile/TileContent";
 import type { ILayer } from "../layer/ILayer";
 import type { ITileCache } from "../tile/ITileCache";
 import type { IFloatingOrigin } from "../origin/IFloatingOrigin";
@@ -22,15 +21,24 @@ export type TileLoadCallback = (
   signal: AbortSignal,
 ) => Promise<TileContent | null>;
 
+/** Track an in-flight tile load for cancellation */
+interface LoadingEntry {
+  controller: AbortController;
+  layerIds: Set<string>;
+}
+
 /**
  * TileManager — 每帧调度并加载可见 Tile
  *
  * 流程：
  *   1. 计算共享 CRS 视野范围
  *   2. 从所有可见 Layer 收集候选 TileKey
- *   3. 查 Cache → 命中则直接显示
- *   4. TileScheduler → 优先级排序
- *   5. 按帧预算取 batch → 加载 → 创建 TileContent
+ *   3. 按 TileKey 合并同 Key 的多层请求（Tile 共享）
+ *   4. 查 Cache → 命中则直接显示
+ *   5. 父 Tile 优先（渐进式显示，永不留白）
+ *   6. 取消离开视野的加载中 Tile
+ *   7. TileScheduler → 优先级排序
+ *   8. 按帧预算取 batch → 加载 → 创建 TileContent
  */
 export class TileManager {
   readonly scheduler = new TileScheduler();
@@ -39,6 +47,8 @@ export class TileManager {
 
   private readonly _loadFn: TileLoadCallback;
   private _loadedTiles = new Map<string, Tile>();
+  /** In-flight loads: tileKey → { controller, layerIds } */
+  private _loading = new Map<string, LoadingEntry>();
 
   constructor(
     cache: ITileCache<Tile>,
@@ -68,49 +78,120 @@ export class TileManager {
     layers: ILayer[],
     resolution?: number,
   ): void {
-    // 1. 收集所有候选请求
-    const requests: LoadRequest[] = [];
+    // 1. 收集候选 TileKey → layerIds（按 key 合并）
+    const keyToLayerIds = new Map<string, { key: TileKey; layerIds: Set<string>; bounds: CrsBounds }>();
     for (const layer of layers) {
       const keys = layer.getVisibleTiles(extent, crs, resolution);
       for (const key of keys) {
-        const cacheKey = tileKeyToString(key);
+        const strKey = tileKeyToString(key);
 
-        // 已在缓存或 loaded → 更新访问时间，跳过
-        if (this._loadedTiles.has(cacheKey)) {
-          const tile = this._loadedTiles.get(cacheKey)!;
-          tile.lastAccessTime = Date.now();
-          continue;
-        }
-        if (this.cache.has(cacheKey)) {
-          const tile = this.cache.get(cacheKey)!;
-          this._loadedTiles.set(cacheKey, tile);
-          tile.lastAccessTime = Date.now();
+        // 已在加载中 → 追加 layerId
+        if (this._loading.has(strKey)) {
+          this._loading.get(strKey)!.layerIds.add(layer.id);
           continue;
         }
 
-        // 计算距离和面积（简化：用中心点）
-        const bounds = layer.tileScheme.getTileBounds(key);
-        const centerX = (bounds[0] + bounds[2]) / 2;
-        const centerY = (bounds[1] + bounds[3]) / 2;
-        const dx = centerX - cameraPos.x;
-        const dy = centerY - cameraPos.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-        const area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]);
+        // 已在缓存或 loaded → 更新访问时间
+        if (this._loadedTiles.has(strKey)) {
+          const tile = this._loadedTiles.get(strKey)!;
+          tile.lastAccessTime = Date.now();
+          continue;
+        }
+        if (this.cache.has(strKey)) {
+          const tile = this.cache.get(strKey)!;
+          this._loadedTiles.set(strKey, tile);
+          tile.lastAccessTime = Date.now();
+          continue;
+        }
 
-        requests.push({
-          tileKey: key,
-          layerId: layer.id,
-          distanceToCamera: dist,
-          screenArea: Math.min(area / 1e6, 1), // 归一化
-          inFrustum: true, // 简化：extent 内即视为在视锥内
-        });
+        // 新请求 → 合并 layerIds
+        if (keyToLayerIds.has(strKey)) {
+          keyToLayerIds.get(strKey)!.layerIds.add(layer.id);
+        } else {
+          const bounds = layer.tileScheme.getTileBounds(key);
+          keyToLayerIds.set(strKey, {
+            key,
+            layerIds: new Set([layer.id]),
+            bounds,
+          });
+        }
       }
     }
 
-    // 2. 调度排序
-    this.scheduler.schedule(requests);
+    // 2. 取消离开视野的加载中 Tile + 清除队列
+    const visibleKeys = new Set(keyToLayerIds.keys());
+    for (const [strKey, entry] of this._loading) {
+      if (!visibleKeys.has(strKey)) {
+        entry.controller.abort();
+        this._loading.delete(strKey);
+        this.scheduler.abortByKey(strKey);
+      }
+    }
+    this.scheduler.cancelOffscreen(visibleKeys);
 
-    // 3. 取本帧 batch 并加载
+    // 3. 构建 LoadRequest 列表
+    const requests: LoadRequest[] = [];
+    for (const [strKey, { key, layerIds, bounds }] of keyToLayerIds) {
+      const centerX = (bounds[0] + bounds[2]) / 2;
+      const centerY = (bounds[1] + bounds[3]) / 2;
+      const dx = centerX - cameraPos.x;
+      const dy = centerY - cameraPos.y;
+      const dist = Math.sqrt(dx * dx + dy * dy);
+      const area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]);
+
+      requests.push({
+        tileKey: key,
+        layerIds: [...layerIds],
+        distanceToCamera: dist,
+        screenArea: Math.min(area / 1e6, 1),
+        inFrustum: true,
+      });
+    }
+
+    // 4. 渐进式显示：父 Tile 未加载时，插入父 Tile 请求（优先加载低分辨率）
+    const parentRequests: LoadRequest[] = [];
+    const childKeys = new Set<string>(); // children that got a parent injected
+    for (const req of requests) {
+      // Find a representative layer to compute parent key
+      const repLayer = layers.find((l) => l.id === req.layerIds[0]);
+      if (!repLayer) continue;
+      const parentKey = repLayer.tileScheme.getParentKey(req.tileKey);
+      if (!parentKey) continue;
+      const parentStr = tileKeyToString(parentKey);
+      // Only inject if parent is NOT loaded, NOT in cache, and NOT already being requested
+      if (
+        !this._loadedTiles.has(parentStr) &&
+        !this.cache.has(parentStr) &&
+        !keyToLayerIds.has(parentStr) &&
+        !parentRequests.some((p) => tileKeyToString(p.tileKey) === parentStr) &&
+        !this._loading.has(parentStr)
+      ) {
+        const parentBounds = repLayer.tileScheme.getTileBounds(parentKey);
+        const pCenterX = (parentBounds[0] + parentBounds[2]) / 2;
+        const pCenterY = (parentBounds[1] + parentBounds[3]) / 2;
+        const pDx = pCenterX - cameraPos.x;
+        const pDy = pCenterY - cameraPos.y;
+        const pDist = Math.sqrt(pDx * pDx + pDy * pDy);
+        const pArea = (parentBounds[2] - parentBounds[0]) * (parentBounds[3] - parentBounds[1]);
+
+        parentRequests.push({
+          tileKey: parentKey,
+          layerIds: req.layerIds,
+          distanceToCamera: pDist,
+          screenArea: Math.min(pArea / 1e6, 1),
+          inFrustum: true,
+        });
+        childKeys.add(tileKeyToString(req.tileKey));
+      }
+    }
+
+    // Prepend parent requests (higher priority — load low-res first)
+    const allRequests = [...parentRequests, ...requests];
+
+    // 5. 调度排序
+    this.scheduler.schedule(allRequests);
+
+    // 6. 取本帧 batch 并加载
     const batch = this.scheduler.takeNext();
     for (const req of batch) {
       this._loadTile(req, layers);
@@ -150,15 +231,16 @@ export class TileManager {
     for (const [key, tile] of this._loadedTiles) {
       if (!this.cache.has(key)) {
         this._loadedTiles.delete(key);
-        if (!tile.contents.every((c) => c.disposed)) {
-          // 已在 cache.trim 中 dispose
-        }
       }
     }
   }
 
   dispose(): void {
     this.scheduler.abortAll();
+    for (const [, entry] of this._loading) {
+      entry.controller.abort();
+    }
+    this._loading.clear();
     this.cache.clear();
     this._loadedTiles.clear();
   }
@@ -169,31 +251,55 @@ export class TileManager {
     req: LoadRequest,
     layers: ILayer[],
   ): Promise<void> {
-    const layer = layers.find((l) => l.id === req.layerId);
-    if (!layer) return;
-
-    const bounds = layer.tileScheme.getTileBounds(req.tileKey);
-    const origin: CrsCoord = {
-      x: Math.floor(bounds[0] / 500) * 500,
-      y: Math.floor(bounds[1] / 500) * 500,
-      z: 0,
-    };
-
-    const tile = new Tile(req.tileKey, bounds, origin);
     const cacheKey = tileKeyToString(req.tileKey);
 
+    // 检查是否已有 Tile 实例（同 key 多层共享）
+    let tile = this._loadedTiles.get(cacheKey);
+    let isNew = false;
+
+    if (!tile) {
+      // 找第一个有效 layer 获取 bounds
+      const firstLayer = layers.find((l) => req.layerIds.includes(l.id));
+      if (!firstLayer) return;
+
+      const bounds = firstLayer.tileScheme.getTileBounds(req.tileKey);
+      const origin: CrsCoord = {
+        x: Math.floor(bounds[0] / 500) * 500,
+        y: Math.floor(bounds[1] / 500) * 500,
+        z: 0,
+      };
+      tile = new Tile(req.tileKey, bounds, origin);
+      isNew = true;
+    }
+
     const controller = new AbortController();
-    this.scheduler.startLoading(req.tileKey, controller.signal);
+    this._loading.set(cacheKey, { controller, layerIds: new Set(req.layerIds) });
+    this.scheduler.startLoading(req.tileKey, controller);
 
     try {
       tile.state = "loading";
-      const content = await this._loadFn(tile, layer, controller.signal);
 
-      if (content) {
+      // 为每个 layer 加载内容
+      for (const layerId of req.layerIds) {
+        const layer = layers.find((l) => l.id === layerId);
+        if (!layer) continue;
+
+        // 检查该 layer 是否已有 content（避免重复）
+        const hasContent = tile.contents.some((c) => c.layerId === layerId);
+        if (hasContent) continue;
+
+        const content = await this._loadFn(tile, layer, controller.signal);
+        if (content) {
+          tile.contents.push(content);
+        }
+      }
+
+      if (tile.contents.length > 0) {
         tile.state = "loaded";
-        tile.contents.push(content);
-        this._loadedTiles.set(cacheKey, tile);
-        this.cache.set(cacheKey, tile, this._estimateBytes(tile));
+        if (isNew) {
+          this._loadedTiles.set(cacheKey, tile);
+          this.cache.set(cacheKey, tile, this._estimateBytes(tile));
+        }
         this.scheduler.markLoaded(req.tileKey);
       } else {
         tile.state = "failed";
@@ -204,11 +310,12 @@ export class TileManager {
       tile.state = "failed";
       tile.failCount++;
       this.scheduler.markFailed(req.tileKey);
+    } finally {
+      this._loading.delete(cacheKey);
     }
   }
 
   private _estimateBytes(tile: Tile): number {
-    // 简化估算：每个 RenderObject ~1KB + 内容大小
     let bytes = 1024; // Tile 元数据
     for (const content of tile.contents) {
       bytes += content.renderObjects.length * 1024;

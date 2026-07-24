@@ -1,5 +1,5 @@
 // geo-engine/packages/engine/src/manager/__tests__/TileScheduler.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { TileScheduler, type LoadRequest } from "../TileScheduler";
 import { makeTileKey } from "../../tile/TileKey";
 
@@ -11,7 +11,7 @@ function makeReq(
 ): LoadRequest {
   return {
     tileKey: makeTileKey("proj", id, 0),
-    layerId: "L1",
+    layerIds: ["L1"],
     distanceToCamera: dist,
     screenArea: area,
     inFrustum,
@@ -53,12 +53,12 @@ describe("TileScheduler", () => {
     const key = makeTileKey("proj", "dup", 0);
     const r1: LoadRequest = {
       tileKey: key,
-      layerId: "L1",
+      layerIds: ["L1"],
       distanceToCamera: 100,
       screenArea: 0.5,
       inFrustum: true,
     };
-    const r2: LoadRequest = { ...r1, layerId: "L2" };
+    const r2: LoadRequest = { ...r1, layerIds: ["L2"] };
 
     const sorted = s.schedule([r1, r2]);
     expect(sorted).toHaveLength(1); // deduped by tile key
@@ -69,10 +69,54 @@ describe("TileScheduler", () => {
     const key = makeTileKey("proj", "0-0", 0);
 
     const controller = new AbortController();
-    s.startLoading(key, controller.signal);
+    s.startLoading(key, controller);
     expect(s.loadingCount).toBe(1);
 
     s.markLoaded(key);
     expect(s.loadingCount).toBe(0);
+  });
+
+  it("should abort a loading tile", () => {
+    const s = new TileScheduler();
+    const key = makeTileKey("proj", "abort-me", 0);
+    const controller = new AbortController();
+    const abortSpy = vi.spyOn(controller, "abort");
+
+    s.startLoading(key, controller);
+    expect(s.loadingCount).toBe(1);
+
+    s.abort(key);
+    expect(abortSpy).toHaveBeenCalledOnce();
+    expect(s.loadingCount).toBe(0);
+  });
+
+  it("should mark failed and remove from loading", () => {
+    const s = new TileScheduler();
+    const key = makeTileKey("proj", "fail", 0);
+    const controller = new AbortController();
+
+    s.startLoading(key, controller);
+    expect(s.loadingCount).toBe(1);
+
+    s.markFailed(key);
+    expect(s.loadingCount).toBe(0);
+  });
+
+  it("should abort all loading tiles", () => {
+    const s = new TileScheduler();
+    const c1 = new AbortController();
+    const c2 = new AbortController();
+    const spy1 = vi.spyOn(c1, "abort");
+    const spy2 = vi.spyOn(c2, "abort");
+
+    s.startLoading(makeTileKey("proj", "a", 0), c1);
+    s.startLoading(makeTileKey("proj", "b", 0), c2);
+    expect(s.loadingCount).toBe(2);
+
+    s.abortAll();
+    expect(spy1).toHaveBeenCalledOnce();
+    expect(spy2).toHaveBeenCalledOnce();
+    expect(s.loadingCount).toBe(0);
+    expect(s.queueLength).toBe(0);
   });
 });
