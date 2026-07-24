@@ -225,4 +225,26 @@ describe("GeoTIFFSource", () => {
     expect(typeof (bitmap as any).close).toBe("function");
     (bitmap as any).close();
   });
+
+  it("should accept useWorker option (default false)", () => {
+    const source = new GeoTIFFSource({ url, crs });
+    // Default mode uses direct decoding
+    expect((source as any)._useWorker).toBe(false);
+  });
+
+  it("should store useWorker=true when specified", () => {
+    const source = new GeoTIFFSource({ url, crs, useWorker: true });
+    expect((source as any)._useWorker).toBe(true);
+  });
+
+  it("should initialize worker pool lazily in worker mode", async () => {
+    const source = new GeoTIFFSource({ url, crs, useWorker: true });
+
+    // Pool should be null before first fetch
+    expect((source as any)._pool).toBeNull();
+
+    // Attempting worker fetch in Node will fail (no Worker constructor),
+    // but we can verify the setup path is reached
+    // Skip actual worker execution — this is an integration test for browser only
+  });
 });

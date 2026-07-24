@@ -1,5 +1,5 @@
 /**
- * GeoEngine Phase 7 Demo — OSM Basemap + Checkerboard + Vector Overlay
+ * GeoEngine Phase 8 Demo — OSM Basemap + Checkerboard + Vector Overlay
  *
  * 验证：
  *   1. XYZ 瓦片加载（OSM 底图）通过 XYZTileScheme → XYZTileSource → RasterRenderer
@@ -14,6 +14,8 @@
  *  10. TileScheduler 4D 优先级 + 渐进式父 Tile 显示
  *  11. 瓦片共享（同 key 多层） + 离屏加载取消
  *  12. 300ms 淡入过渡动画
+ *  13. WorkerPool 共享 Web Worker 池（GeoTIFF 解码卸载）
+ *  14. DXFSource 入口预留（stub）
  */
 
 import * as THREE from "three";
@@ -49,6 +51,7 @@ import {
   type TileLoadCallback,
   TileContent,
   RenderObject,
+  WorkerPool,
 } from "@geo-engine/core";
 
 // ═══════════════════════════════════════════════════════════════
@@ -377,7 +380,11 @@ async function main() {
   // const geoTiffSource = new GeoTIFFSource({
   //   url: "/data/ortho.tif",
   //   crs, // data CRS must match engine CRS (Phase 5 limitation)
+  //   useWorker: true,  // Phase 8: offload decode to WorkerPool
   // });
+  // // WorkerPool can also be used directly:
+  // // const pool = new WorkerPool();
+  // // const result = await pool.exec({ script: workerUrl, data: {...} });
   // const geoTiffScheme = new ProjectTileScheme(500);
   // const geoTiffRenderer = new RasterRenderer({
   //   name: "ortho-renderer",

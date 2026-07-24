@@ -7,4 +7,5 @@ export * from "./source";
 export * from "./renderer";
 export * from "./layer";
 export * from "./manager";
+export * from "./worker";
 export * from "./camera";
