@@ -1,0 +1,10 @@
+{
+  "name": "geo-engine-monorepo",
+  "private": true,
+  "workspaces": ["packages/*"],
+  "scripts": {
+    "dev": "npm run dev -w packages/demo",
+    "build": "npm run build -w packages/engine",
+    "test": "npm run test -w packages/engine"
+  }
+}

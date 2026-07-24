@@ -1,0 +1,17 @@
+{
+  "name": "@geo-engine/demo",
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@geo-engine/core": "*",
+    "three": "^0.168.0"
+  },
+  "devDependencies": {
+    "vite": "^5.4.0",
+    "typescript": "^5.5.0"
+  }
+}
