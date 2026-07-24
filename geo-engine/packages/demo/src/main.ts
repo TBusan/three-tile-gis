@@ -1,11 +1,13 @@
 /**
- * GeoEngine Phase 2 Demo — OSM Basemap + Checkerboard Overlay
+ * GeoEngine Phase 3 Demo — OSM Basemap + Checkerboard + Vector Overlay
  *
  * 验证：
  *   1. XYZ 瓦片加载（OSM 底图）通过 XYZTileScheme → XYZTileSource → RasterRenderer
- *   2. 多图层叠加（底图 + 棋盘格 overlay）
+ *   2. 多图层叠加（底图 + 棋盘格 overlay + GeoJSON 矢量覆盖层）
  *   3. Three.js WebGL 渲染管线
  *   4. CGCS2000 GK 38 带投影
+ *   5. Multi-level LOD（缩放时 tile 级别自动切换）
+ *   6. VectorRenderer 支持 Point / LineString / Polygon
  */
 
 import * as THREE from "three";
@@ -14,10 +16,14 @@ import {
   CGCS2000GKCRS,
   WebMercatorCRS,
   RasterLayer,
+  VectorLayer,
   ProjectTileScheme,
   XYZTileScheme,
   XYZTileSource,
+  GeoJSONSource,
   RasterRenderer,
+  VectorRenderer,
+  DefaultMaterialFactory,
   MapCameraController,
   type Tile,
   type IDataSource,
@@ -207,6 +213,146 @@ async function main() {
     zIndex: 10,
   });
 
+  // Layer 3: GeoJSON vector overlay (ProjectTileScheme)
+  // Sample data in CGCS2000 GK38 coords around (500000, 3650000)
+  const sampleGeoJSON = {
+    type: "FeatureCollection",
+    features: [
+      // Roads (LineStrings)
+      {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [499500, 3649500],
+            [500500, 3649500],
+            [500500, 3650500],
+            [499500, 3650500],
+            [499500, 3649500],
+          ],
+        },
+        properties: { name: "Ring Road", highway: "primary" },
+      },
+      {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [500000, 3649000],
+            [500000, 3651000],
+          ],
+        },
+        properties: { name: "Main Street", highway: "secondary" },
+      },
+      {
+        type: "Feature",
+        geometry: {
+          type: "LineString",
+          coordinates: [
+            [499000, 3650000],
+            [501000, 3650000],
+          ],
+        },
+        properties: { name: "East-West Ave", highway: "secondary" },
+      },
+      // Buildings (Polygons)
+      {
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [499800, 3649800],
+              [500000, 3649800],
+              [500000, 3650000],
+              [499800, 3650000],
+              [499800, 3649800],
+            ],
+          ],
+        },
+        properties: { name: "Building A", floors: 3 },
+      },
+      {
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [500100, 3649700],
+              [500300, 3649700],
+              [500300, 3649900],
+              [500100, 3649900],
+              [500100, 3649700],
+            ],
+          ],
+        },
+        properties: { name: "Building B", floors: 5 },
+      },
+      {
+        type: "Feature",
+        geometry: {
+          type: "Polygon",
+          coordinates: [
+            [
+              [499700, 3650100],
+              [499900, 3650100],
+              [499900, 3650300],
+              [499700, 3650300],
+              [499700, 3650100],
+            ],
+            // Hole (courtyard)
+            [
+              [499750, 3650150],
+              [499850, 3650150],
+              [499850, 3650250],
+              [499750, 3650250],
+              [499750, 3650150],
+            ],
+          ],
+        },
+        properties: { name: "Building C (with courtyard)", floors: 2 },
+      },
+      // Points of interest
+      {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [500000, 3650000] },
+        properties: { name: "City Center", type: "landmark" },
+      },
+      {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [500200, 3650200] },
+        properties: { name: "Tower", type: "landmark" },
+      },
+      {
+        type: "Feature",
+        geometry: { type: "Point", coordinates: [499600, 3649600] },
+        properties: { name: "Entrance", type: "gate" },
+      },
+    ],
+  };
+
+  const geoBlob = new Blob([JSON.stringify(sampleGeoJSON)], {
+    type: "application/json",
+  });
+  const geoURL = URL.createObjectURL(geoBlob);
+
+  const vectorSource = new GeoJSONSource(geoURL, crs);
+  const vectorScheme = new ProjectTileScheme(500);
+  const vectorMatFactory = new DefaultMaterialFactory({
+    pointColor: 0xe74c3c, // red
+    lineColor: 0xf39c12, // orange
+    fillColor: 0x3498db, // blue
+  });
+  const vectorRenderer = new VectorRenderer(vectorMatFactory, "vector-renderer");
+
+  const vectorLayer = new VectorLayer({
+    name: "Sample Vectors",
+    tileScheme: vectorScheme,
+    dataSource: vectorSource,
+    renderer: vectorRenderer,
+    zIndex: 20,
+  });
+
   // ── Tile load callback ─────────────────────────────────────
   const tileLoadFn: TileLoadCallback = async (tile, layer, signal) => {
     const source = layer.dataSource;
@@ -227,7 +373,7 @@ async function main() {
         name: "Default",
         visible: true,
         opacity: 1,
-        layers: [osmLayer, checkerLayer],
+        layers: [osmLayer, checkerLayer, vectorLayer],
       },
     ],
     cameraController: new MapCameraController({
@@ -240,7 +386,7 @@ async function main() {
   engine.start();
 
   // ── Scene sync ─────────────────────────────────────────────
-  // 跟踪已添加到场景的 tile mesh
+  // 跟踪已添加到场景的 tile group
   const sceneTiles = new Map<string, THREE.Group>();
 
   function syncScene() {
@@ -253,19 +399,19 @@ async function main() {
       if (tile.contents.length === 0) continue;
 
       const group = new THREE.Group();
-      let hasMeshes = false;
+      let hasObjects = false;
 
       for (const content of tile.contents) {
         for (const ro of content.renderObjects) {
-          if (ro.object instanceof THREE.Mesh) {
-            // Take ownership — move mesh from RenderObject to scene group
+          if (ro.object instanceof THREE.Object3D) {
+            // Take ownership — move object from RenderObject to scene group
             group.add(ro.object);
-            hasMeshes = true;
+            hasObjects = true;
           }
         }
       }
 
-      if (!hasMeshes) continue;
+      if (!hasObjects) continue;
 
       // 定位 group 于 tile origin（局部坐标 = CRS - floating origin）
       group.position.set(

@@ -38,6 +38,11 @@ export interface ILayer {
    * 获取视锥范围内的可见 TileKey
    * @param extent — CRS 空间视野范围
    * @param crs — 当前工程坐标系
+   * @param resolution — 可选，当前分辨率（米/像素），用于选择合适的 tile 级别
    */
-  getVisibleTiles(extent: CrsBounds, crs: IProjectCRS): TileKey[];
+  getVisibleTiles(
+    extent: CrsBounds,
+    crs: IProjectCRS,
+    resolution?: number,
+  ): TileKey[];
 }

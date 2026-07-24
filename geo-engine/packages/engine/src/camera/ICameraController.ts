@@ -13,6 +13,8 @@ export interface ICameraController {
   readonly cameraWorldPos: CrsCoord;
   /** CRS 空间中的视野范围 [xmin, ymin, xmax, ymax] */
   readonly extent: [number, number, number, number];
+  /** 可选：当前分辨率（米/像素），用于 tile 级别选择 */
+  readonly resolution?: number;
 
   /** 绑定到 DOM 元素 */
   attach(container: HTMLElement): void;

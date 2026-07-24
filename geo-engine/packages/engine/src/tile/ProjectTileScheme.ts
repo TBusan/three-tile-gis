@@ -34,9 +34,32 @@ export class ProjectTileScheme implements ITileScheme {
     return this.baseTileSize * Math.pow(2, level);
   }
 
-  getTilesInView(extent: CrsBounds, crs: IProjectCRS): TileKey[] {
-    // 暂用第 0 级（最细）；后续可扩展为多级自适应
-    return this._getTilesAtLevel(extent, 0);
+  getTilesInView(
+    extent: CrsBounds,
+    _crs: IProjectCRS,
+    resolution?: number,
+  ): TileKey[] {
+    const level = this.pickLevel(resolution ?? 0);
+    return this._getTilesAtLevel(extent, level);
+  }
+
+  /**
+   * 根据分辨率选择合适的 tile 级别
+   *
+   * 目标：让每个 tile 在屏幕上约占 TARGET_PIXELS 像素
+   * level 0 = baseTileSize 米/tile，每增加 1 级 tile 大小加倍
+   *
+   * @param resolution — 当前分辨率（米/像素），0 表示未指定（返回第 0 级）
+   */
+  pickLevel(resolution: number): number {
+    if (resolution <= 0) return 0;
+    const TARGET_PIXELS = 256;
+    const idealTileSize = resolution * TARGET_PIXELS;
+    if (idealTileSize >= this.baseTileSize) return 0;
+    const level = Math.round(
+      Math.log2(this.baseTileSize / idealTileSize),
+    );
+    return Math.max(0, level);
   }
 
   getTileBounds(key: TileKey): CrsBounds {

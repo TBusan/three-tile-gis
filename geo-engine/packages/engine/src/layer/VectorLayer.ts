@@ -1,4 +1,4 @@
-// geo-engine/packages/engine/src/layer/RasterLayer.ts
+// geo-engine/packages/engine/src/layer/VectorLayer.ts
 
 import type { IProjectCRS } from "../crs/IProjectCRS";
 import type { CrsBounds } from "../core/types";
@@ -8,8 +8,8 @@ import type { IDataSource } from "../source/IDataSource";
 import type { ILayerRenderer } from "../renderer/ILayerRenderer";
 import type { ILayer, LayerType } from "./ILayer";
 
-/** RasterLayer 构造选项 */
-export interface RasterLayerOptions {
+/** VectorLayer 构造选项 */
+export interface VectorLayerOptions {
   id?: string;
   name: string;
   type?: LayerType;
@@ -23,17 +23,19 @@ export interface RasterLayerOptions {
 }
 
 /**
- * 栅格图层 — 最常用的 Layer 实现
+ * 矢量图层 — 组合 TileScheme + DataSource + VectorRenderer
+ *
+ * 与 RasterLayer 结构相同，仅默认 type 为 "vector"。
  *
  * 用法：
- *   const layer = new RasterLayer({
- *     name: "正射影像",
+ *   const layer = new VectorLayer({
+ *     name: "道路",
  *     tileScheme: new ProjectTileScheme(500),
- *     dataSource: new GeoTIFFSource({ url: "./ortho.tif", crs: ... }),
- *     renderer: new RasterRenderer({ qualityTier: new SimplePlane() }),
+ *     dataSource: new GeoJSONSource("./roads.geojson", crs),
+ *     renderer: new VectorRenderer(new DefaultMaterialFactory()),
  *   });
  */
-export class RasterLayer implements ILayer {
+export class VectorLayer implements ILayer {
   readonly id: string;
   readonly name: string;
   readonly type: LayerType;
@@ -45,12 +47,10 @@ export class RasterLayer implements ILayer {
   readonly renderer: ILayerRenderer;
   readonly dependsOn: ILayer[];
 
-  private _idCounter = 0;
-
-  constructor(options: RasterLayerOptions) {
-    this.id = options.id ?? `raster-${++RasterLayer._nextId}`;
+  constructor(options: VectorLayerOptions) {
+    this.id = options.id ?? `vector-${++VectorLayer._nextId}`;
     this.name = options.name;
-    this.type = options.type ?? "raster";
+    this.type = options.type ?? "vector";
     this.tileScheme = options.tileScheme;
     this.dataSource = options.dataSource;
     this.renderer = options.renderer;

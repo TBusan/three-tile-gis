@@ -2,3 +2,5 @@
 export { type IDataSource } from "./IDataSource";
 export { DataSourceRegistry, type DataSourceCtor } from "./DataSourceRegistry";
 export { XYZTileSource } from "./XYZTileSource";
+export { GeoJSONSource, type GeoFeature, type GeoJSONGeometryType } from "./GeoJSONSource";
+export { DXFSource, type DXFEntity } from "./DXFSource";

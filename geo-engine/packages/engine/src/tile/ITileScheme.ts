@@ -18,8 +18,13 @@ export interface ITileScheme {
    *
    * @param extent — CRS 空间中的视野范围 [xmin, ymin, xmax, ymax]
    * @param crs — 当前工程坐标系
+   * @param resolution — 可选，当前分辨率（米/像素），用于选择合适的 tile 级别
    */
-  getTilesInView(extent: CrsBounds, crs: IProjectCRS): TileKey[];
+  getTilesInView(
+    extent: CrsBounds,
+    crs: IProjectCRS,
+    resolution?: number,
+  ): TileKey[];
 
   /**
    * 给定 TileKey，返回 CRS 空间包围盒

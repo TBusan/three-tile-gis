@@ -66,11 +66,12 @@ export class TileManager {
     cameraPos: CrsCoord,
     crs: IProjectCRS,
     layers: ILayer[],
+    resolution?: number,
   ): void {
     // 1. 收集所有候选请求
     const requests: LoadRequest[] = [];
     for (const layer of layers) {
-      const keys = layer.getVisibleTiles(extent, crs);
+      const keys = layer.getVisibleTiles(extent, crs, resolution);
       for (const key of keys) {
         const cacheKey = tileKeyToString(key);
 

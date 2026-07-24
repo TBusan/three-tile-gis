@@ -120,6 +120,11 @@ export class MapCameraController implements ICameraController {
     return this._zoom;
   }
 
+  /** 分辨率（米/像素），同 zoom */
+  get resolution(): number {
+    return this._zoom;
+  }
+
   update(_deltaTime: number): void {
     // 大多数更新在事件回调中处理
   }

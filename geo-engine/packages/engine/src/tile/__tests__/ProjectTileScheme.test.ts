@@ -63,4 +63,33 @@ describe("ProjectTileScheme", () => {
     expect(origin.y).toBe(3654500);
     expect(origin.z).toBe(0);
   });
+
+  it("should pick level 0 when resolution is 0", () => {
+    expect(scheme.pickLevel(0)).toBe(0);
+  });
+
+  it("should pick level 0 when resolution is negative", () => {
+    expect(scheme.pickLevel(-1)).toBe(0);
+  });
+
+  it("should pick level 0 for large resolution (coarse view)", () => {
+    // resolution = 2 m/px → ideal tile = 512m → close to baseTileSize 500 → level 0
+    expect(scheme.pickLevel(2)).toBe(0);
+  });
+
+  it("should pick higher level for smaller resolution (fine view)", () => {
+    // resolution = 0.5 m/px → ideal tile = 128m → baseTileSize/ideal = 3.9 → level ~2
+    expect(scheme.pickLevel(0.5)).toBe(2);
+  });
+
+  it("should return tiles at correct level with resolution", () => {
+    const extent: CrsBounds = [0, 0, 1000, 1000];
+    // resolution = 1 m/px → ideal tile = 256m → pickLevel = round(log2(500/256)) ≈ 1
+    const keys = scheme.getTilesInView(extent, crs, 1);
+    // At level 1: tileSize = 1000m, 0-1000 spans cols 0-1, rows 0-1 → 2×2 = 4 tiles
+    expect(keys.length).toBe(4);
+    for (const k of keys) {
+      expect(k.level).toBe(1);
+    }
+  });
 });

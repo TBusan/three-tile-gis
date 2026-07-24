@@ -52,7 +52,11 @@ export class XYZTileScheme implements ITileScheme {
 
   // ---- ITileScheme ----
 
-  getTilesInView(extent: CrsBounds, crs: IProjectCRS): TileKey[] {
+  getTilesInView(
+    extent: CrsBounds,
+    crs: IProjectCRS,
+    _resolution?: number,
+  ): TileKey[] {
     const targetCrs = crs;
 
     // 1. 采样 extent 角点和中点 → lon/lat

@@ -136,7 +136,13 @@ export class Engine {
     const layers = this.layerManager.getVisibleLayers();
 
     // 4. TileManager 调度
-    this.tileManager.update(extent, cameraPos, this.crs, layers);
+    this.tileManager.update(
+      extent,
+      cameraPos,
+      this.crs,
+      layers,
+      this.cameraController.resolution,
+    );
 
     // 5. 淘汰超出缓存的 Tile
     this.tileManager.evict(this._maxCacheBytes);
