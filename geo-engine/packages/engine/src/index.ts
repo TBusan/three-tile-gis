@@ -2,3 +2,4 @@
 export * from "./core";
 export * from "./crs";
 export * from "./tile";
+export * from "./origin";
