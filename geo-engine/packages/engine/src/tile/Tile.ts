@@ -1,5 +1,6 @@
 // geo-engine/packages/engine/src/tile/Tile.ts
 
+import { Disposable } from "../core/Disposable";
 import type { CrsBounds, CrsCoord } from "../core/types";
 import type { TileKey } from "./TileKey";
 import type { TileState } from "./TileState";
@@ -12,7 +13,7 @@ import type { TileContent } from "./TileContent";
  * 多个 Layer 拍到同一个 TileKey 时共享同一个 Tile 实例，
  * 各自追加 TileContent 到 contents[]。
  */
-export class Tile {
+export class Tile extends Disposable {
   readonly id: string;
   readonly key: TileKey;
   readonly bounds: CrsBounds;
@@ -30,6 +31,7 @@ export class Tile {
   priority = 0;
 
   constructor(key: TileKey, bounds: CrsBounds, origin: CrsCoord) {
+    super();
     this.id = `${key.schemeId}:${key.id}`;
     this.key = key;
     this.bounds = bounds;
@@ -43,5 +45,13 @@ export class Tile {
     this.contents.length = 0;
     this.failCount = 0;
     this.priority = 0;
+  }
+
+  dispose(): void {
+    for (const content of this.contents) {
+      if (!content.disposed) content.dispose();
+    }
+    this.contents.length = 0;
+    this.markDisposed();
   }
 }
