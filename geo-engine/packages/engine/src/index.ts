@@ -6,3 +6,5 @@ export * from "./origin";
 export * from "./source";
 export * from "./renderer";
 export * from "./layer";
+export * from "./manager";
+export * from "./camera";
