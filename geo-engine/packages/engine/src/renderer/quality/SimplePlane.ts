@@ -2,6 +2,7 @@
 
 import * as THREE from "three";
 import type { CrsBounds, CrsCoord } from "../../core/types";
+import type { IQualityTier } from "./IQualityTier";
 
 /**
  * SimplePlane — 无细分平面几何体生成器
@@ -9,15 +10,13 @@ import type { CrsBounds, CrsCoord } from "../../core/types";
  * 为每个 tile 创建覆盖其 CRS 包围盒的单个 PlaneGeometry，
  * 所有顶点坐标相对于 tile.origin（局部坐标）。
  *
- * 后续可扩展为 N×N 网格细分（用于 GPU 重投影校正）。
+ * 后续可升级为 SubdividedPlane（N×N 细分网格用于 GPU 重投影校正）。
  */
-export class SimplePlane {
+export class SimplePlane implements IQualityTier {
+  readonly type = "simple";
+
   /**
    * 创建 Tile 的平面几何体
-   *
-   * @param bounds — Tile 在 CRS 空间中的包围盒
-   * @param origin — Tile 的局部原点（CRS 坐标）
-   * @returns PlaneGeometry，顶点在局部坐标中
    */
   createGeometry(bounds: CrsBounds, origin: CrsCoord): THREE.BufferGeometry {
     const [xmin, ymin, xmax, ymax] = bounds;

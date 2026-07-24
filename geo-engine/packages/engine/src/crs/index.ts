@@ -2,3 +2,4 @@
 export { type IProjectCRS } from "./IProjectCRS";
 export { CGCS2000GKCRS } from "./CGCS2000GK";
 export { WebMercatorCRS } from "./WebMercator";
+export { Proj4CRS } from "./Proj4CRS";

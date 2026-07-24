@@ -6,3 +6,4 @@ export { GeoJSONSource, type GeoFeature, type GeoJSONGeometryType } from "./GeoJ
 export { DXFSource, type DXFEntity } from "./DXFSource";
 export { PointCloudSource, type PointCloudEntity } from "./PointCloudSource";
 export { GPRSource, type VoxelGrid } from "./GPRSource";
+export { GeoTIFFSource, type GeoTIFFSourceOptions } from "./GeoTIFFSource";

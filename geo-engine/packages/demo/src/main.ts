@@ -1,5 +1,5 @@
 /**
- * GeoEngine Phase 3 Demo — OSM Basemap + Checkerboard + Vector Overlay
+ * GeoEngine Phase 5 Demo — OSM Basemap (SubdividedPlane) + Checkerboard + Vector Overlay
  *
  * 验证：
  *   1. XYZ 瓦片加载（OSM 底图）通过 XYZTileScheme → XYZTileSource → RasterRenderer
@@ -8,6 +8,8 @@
  *   4. CGCS2000 GK 38 带投影
  *   5. Multi-level LOD（缩放时 tile 级别自动切换）
  *   6. VectorRenderer 支持 Point / LineString / Polygon
+ *   7. SubdividedPlane 细分网格提升 XYZ→GCJ38 重投影精度
+ *   8. Proj4CRS 支持任意 EPSG 代码
  */
 
 import * as THREE from "three";
@@ -15,15 +17,18 @@ import {
   Engine,
   CGCS2000GKCRS,
   WebMercatorCRS,
+  Proj4CRS,
   RasterLayer,
   VectorLayer,
   ProjectTileScheme,
   XYZTileScheme,
   XYZTileSource,
   GeoJSONSource,
+  GeoTIFFSource,
   RasterRenderer,
   VectorRenderer,
   DefaultMaterialFactory,
+  SubdividedPlane,
   MapCameraController,
   type Tile,
   type IDataSource,
@@ -190,7 +195,10 @@ async function main() {
     "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
     { minZoom: 0, maxZoom: 18 },
   );
-  const osmRenderer = new RasterRenderer({ name: "osm-renderer" });
+  const osmRenderer = new RasterRenderer({
+    name: "osm-renderer",
+    quality: new SubdividedPlane(8), // 8×8 subdivision for accurate XYZ→GCJ38 reprojection
+  });
 
   const osmLayer = new RasterLayer({
     name: "OSM Basemap",
@@ -352,6 +360,24 @@ async function main() {
     renderer: vectorRenderer,
     zIndex: 20,
   });
+
+  // ── GeoTIFF Example (commented out — requires a .tif file) ─
+  // const geoTiffSource = new GeoTIFFSource({
+  //   url: "/data/ortho.tif",
+  //   crs, // data CRS must match engine CRS (Phase 5 limitation)
+  // });
+  // const geoTiffScheme = new ProjectTileScheme(500);
+  // const geoTiffRenderer = new RasterRenderer({
+  //   name: "ortho-renderer",
+  //   quality: new SubdividedPlane(4),
+  // });
+  // const geoTiffLayer = new RasterLayer({
+  //   name: "Orthophoto",
+  //   tileScheme: geoTiffScheme,
+  //   dataSource: geoTiffSource,
+  //   renderer: geoTiffRenderer,
+  //   zIndex: 5,
+  // });
 
   // ── Tile load callback ─────────────────────────────────────
   const tileLoadFn: TileLoadCallback = async (tile, layer, signal) => {

@@ -9,6 +9,8 @@
     "test:watch": "vitest"
   },
   "dependencies": {
+    "geotiff": "^3.0.5",
+    "proj4": "^2.20.9",
     "three": "^0.168.0"
   },
   "devDependencies": {

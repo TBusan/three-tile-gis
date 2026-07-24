@@ -4,6 +4,7 @@ import * as THREE from "three";
 import type { Tile } from "../tile/Tile";
 import { TileContent, RenderObject } from "../tile/TileContent";
 import type { ILayerRenderer } from "./ILayerRenderer";
+import type { IQualityTier } from "./quality/IQualityTier";
 import { SimplePlane } from "./quality/SimplePlane";
 
 /**
@@ -12,7 +13,7 @@ import { SimplePlane } from "./quality/SimplePlane";
 export interface RasterRendererOptions {
   name?: string;
   /** 几何体质量等级（默认 SimplePlane） */
-  quality?: SimplePlane;
+  quality?: IQualityTier;
 }
 
 /**
@@ -28,7 +29,7 @@ export interface RasterRendererOptions {
  */
 export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
   readonly name: string;
-  private readonly quality: SimplePlane;
+  private readonly quality: IQualityTier;
 
   constructor(options: RasterRendererOptions = {}) {
     this.name = options.name ?? "raster-renderer";
