@@ -8,4 +8,6 @@ export {
   type IMaterialFactory,
   DefaultMaterialFactory,
 } from "./IMaterialFactory";
+export { PointCloudRenderer } from "./PointCloudRenderer";
+export { VolumeRenderer } from "./VolumeRenderer";
 export * from "./quality";
