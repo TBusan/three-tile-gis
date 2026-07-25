@@ -5,10 +5,10 @@
  *   1. XYZ 瓦片加载（OSM 底图）通过 XYZTileScheme → XYZTileSource → RasterRenderer
  *   2. 多图层叠加（底图 + 棋盘格 overlay + GeoJSON 矢量覆盖层）
  *   3. Three.js WebGL 渲染管线
- *   4. CGCS2000 GK 38 带投影
+ *   4. EPSG:3857 Web Mercator（底图原生投影，无重投影变形）
  *   5. Multi-level LOD（缩放时 tile 级别自动切换）
  *   6. VectorRenderer 支持 Point / LineString / Polygon
- *   7. SubdividedPlane 细分网格提升 XYZ→GCJ38 重投影精度
+ *   7. SubdividedPlane 细分网格（按需启用）
  *   8. Proj4CRS / UTMCRS / CustomCRS 多 CRS 支持
  *   9. DEMSource + DemMesh + SkirtedMesh 地形就绪
  *  10. TileScheduler 4D 优先级 + 渐进式父 Tile 显示
@@ -24,7 +24,6 @@
 import * as THREE from "three";
 import {
   Engine,
-  CGCS2000GKCRS,
   WebMercatorCRS,
   Proj4CRS,
   UTMCRS,
@@ -70,7 +69,7 @@ interface CheckerTileData {
 class CheckerboardSource implements IDataSource<CheckerTileData> {
   readonly dataType = "checkerboard";
   readonly crs: IProjectCRS;
-  readonly bounds: CrsBounds = [-1e6, -1e6, 1e6, 1e6];
+  readonly bounds: CrsBounds = [12950000, 4850000, 12965000, 4870000];
 
   constructor(crs: IProjectCRS) {
     this.crs = crs;
@@ -167,7 +166,7 @@ function updateHUD(
 // ═══════════════════════════════════════════════════════════════
 
 async function main() {
-  const crs = new CGCS2000GKCRS(38);
+  const crs = new WebMercatorCRS();
   const app = document.getElementById("app")!;
 
   // ── Three.js setup ──────────────────────────────────────────
@@ -188,8 +187,8 @@ async function main() {
 
   // PerspectiveMapController: PerspectiveCamera + OrbitControls
   const mapController = new PerspectiveMapController({
-    center: { x: 500000, y: 3650000 },
-    distance: 20000,
+    center: { x: 12957000, y: 4860000 },
+    distance: 50000,
     maxPolarAngle: Math.PI / 2.4,
     fov: 70,
     near: 100,
@@ -230,9 +229,8 @@ async function main() {
   //   （MapTiler/天地图需申请 token；XYZTileSource 支持 {z}/{x}/{y}/{-y} 模板）
   const osmRenderer = new RasterRenderer({
     name: "osm-renderer",
-    // 自适应细分（设计文档 §3.5）：低缩放级别（全球视图）自动加密网格，
-    // 消除 XYZ→GK38 重投影在低 zoom 下的横向条纹/擕裂伪影。
-    quality: new SubdividedPlane(8, true),
+    // 底图与引擎同为 EPSG:3857，无重投影变形，无需细分网格
+    quality: new SubdividedPlane(1),
   });
 
   const osmLayer = new RasterLayer({
@@ -257,7 +255,7 @@ async function main() {
   });
 
   // Layer 3: GeoJSON vector overlay (ProjectTileScheme)
-  // Sample data in CGCS2000 GK38 coords around (500000, 3650000)
+  // Sample data in EPSG:3857 coords around Beijing center (~12957000, 4860000)
   const sampleGeoJSON = {
     type: "FeatureCollection",
     features: [
@@ -267,11 +265,11 @@ async function main() {
         geometry: {
           type: "LineString",
           coordinates: [
-            [499500, 3649500],
-            [500500, 3649500],
-            [500500, 3650500],
-            [499500, 3650500],
-            [499500, 3649500],
+            [12956500, 4859500],
+            [12957500, 4859500],
+            [12957500, 4860500],
+            [12956500, 4860500],
+            [12956500, 4859500],
           ],
         },
         properties: { name: "Ring Road", highway: "primary" },
@@ -281,8 +279,8 @@ async function main() {
         geometry: {
           type: "LineString",
           coordinates: [
-            [500000, 3649000],
-            [500000, 3651000],
+            [12957000, 4859000],
+            [12957000, 4861000],
           ],
         },
         properties: { name: "Main Street", highway: "secondary" },
@@ -292,8 +290,8 @@ async function main() {
         geometry: {
           type: "LineString",
           coordinates: [
-            [499000, 3650000],
-            [501000, 3650000],
+            [12956000, 4860000],
+            [12958000, 4860000],
           ],
         },
         properties: { name: "East-West Ave", highway: "secondary" },
@@ -305,11 +303,11 @@ async function main() {
           type: "Polygon",
           coordinates: [
             [
-              [499800, 3649800],
-              [500000, 3649800],
-              [500000, 3650000],
-              [499800, 3650000],
-              [499800, 3649800],
+              [12956800, 4859800],
+              [12957000, 4859800],
+              [12957000, 4860000],
+              [12956800, 4860000],
+              [12956800, 4859800],
             ],
           ],
         },
@@ -321,11 +319,11 @@ async function main() {
           type: "Polygon",
           coordinates: [
             [
-              [500100, 3649700],
-              [500300, 3649700],
-              [500300, 3649900],
-              [500100, 3649900],
-              [500100, 3649700],
+              [12957100, 4859700],
+              [12957300, 4859700],
+              [12957300, 4859900],
+              [12957100, 4859900],
+              [12957100, 4859700],
             ],
           ],
         },
@@ -337,19 +335,19 @@ async function main() {
           type: "Polygon",
           coordinates: [
             [
-              [499700, 3650100],
-              [499900, 3650100],
-              [499900, 3650300],
-              [499700, 3650300],
-              [499700, 3650100],
+              [12956700, 4860100],
+              [12956900, 4860100],
+              [12956900, 4860300],
+              [12956700, 4860300],
+              [12956700, 4860100],
             ],
             // Hole (courtyard)
             [
-              [499750, 3650150],
-              [499850, 3650150],
-              [499850, 3650250],
-              [499750, 3650250],
-              [499750, 3650150],
+              [12956750, 4860150],
+              [12956850, 4860150],
+              [12956850, 4860250],
+              [12956750, 4860250],
+              [12956750, 4860150],
             ],
           ],
         },
@@ -358,17 +356,17 @@ async function main() {
       // Points of interest
       {
         type: "Feature",
-        geometry: { type: "Point", coordinates: [500000, 3650000] },
+        geometry: { type: "Point", coordinates: [12957000, 4860000] },
         properties: { name: "City Center", type: "landmark" },
       },
       {
         type: "Feature",
-        geometry: { type: "Point", coordinates: [500200, 3650200] },
+        geometry: { type: "Point", coordinates: [12957200, 4860200] },
         properties: { name: "Tower", type: "landmark" },
       },
       {
         type: "Feature",
-        geometry: { type: "Point", coordinates: [499600, 3649600] },
+        geometry: { type: "Point", coordinates: [12956600, 4859600] },
         properties: { name: "Entrance", type: "gate" },
       },
     ],
