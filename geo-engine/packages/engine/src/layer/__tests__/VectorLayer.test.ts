@@ -97,16 +97,58 @@ describe("VectorLayer", () => {
     });
 
     const extent: CrsBounds = [0, 0, 1000, 1000];
-    // resolution=1 should pick a different level than default (resolution=0 → level=0)
-    const keysWithRes = layer.getVisibleTiles(extent, crs, 1);
+    // resolution=4 应选出与默认（resolution=0 → level=0）不同的级别
+    const keysWithRes = layer.getVisibleTiles(extent, crs, 4);
     const keysNoRes = layer.getVisibleTiles(extent, crs);
-    // At resolution=1, level 1: tileSize=1000m → 2×2=4 tiles
-    // At resolution=0 (default), level 0: tileSize=500m → 4×4=16 tiles
-    // They should differ
+    // 修正后的 LOD：resolution=4 → ideal=1024m → level 1，tileSize=1000m → 2×2=4 瓦片
+    // resolution=0（默认）→ level 0，tileSize=500m → 3×3=9 瓦片
+    // 两者应不同
     expect(keysWithRes.length).not.toBe(keysNoRes.length);
     for (const k of keysWithRes) {
       expect(k.level).toBe(1);
     }
+  });
+
+  it("should clip visible tiles to data bounds", () => {
+    // mockDataSource.bounds = [0,0,1000,1000]
+    const layer = new VectorLayer({
+      name: "Clipped",
+      tileScheme: scheme,
+      dataSource: mockDataSource(),
+      renderer: mockRenderer(),
+    });
+
+    // 视野远大于数据范围 → 裁剪到数据范围，瓦片数应远少于未裁剪时
+    const bigView: CrsBounds = [0, 0, 4000, 4000];
+    const clippedKeys = layer.getVisibleTiles(bigView, crs);
+    // 裁剪到 [0,0,1000,1000] @ level 0（500m）→ 3×3=9 瓦片（未裁剪会是 9×9=81）
+    expect(clippedKeys.length).toBe(9);
+
+    // 视野完全在数据范围外 → 不返回任何瓦片
+    const outsideView: CrsBounds = [5000, 5000, 6000, 6000];
+    const outsideKeys = layer.getVisibleTiles(outsideView, crs);
+    expect(outsideKeys).toHaveLength(0);
+  });
+
+  it("should request full view when data bounds unknown (degenerate)", () => {
+    // 数据范围未加载（退化为零面积）时，按完整视野请求以触发首载
+    const noBoundsSource = {
+      dataType: "geojson",
+      crs: new CGCS2000GKCRS(38),
+      bounds: [0, 0, 0, 0] as CrsBounds,
+      fetch: async () => [],
+      dispose: () => {},
+    };
+    const layer = new VectorLayer({
+      name: "NoBounds",
+      tileScheme: scheme,
+      dataSource: noBoundsSource,
+      renderer: mockRenderer(),
+    });
+
+    const extent: CrsBounds = [0, 0, 1000, 1000];
+    const keys = layer.getVisibleTiles(extent, crs);
+    expect(keys.length).toBe(9); // 完整视野 @ level 0 → 3×3
   });
 
   it("should accept custom type", () => {

@@ -43,7 +43,7 @@ import {
   SubdividedPlane,
   DemMesh,
   SkirtedMesh,
-  MapCameraController,
+  PerspectiveMapController,
   type Tile,
   type IDataSource,
   type ILayerRenderer,
@@ -178,44 +178,61 @@ async function main() {
 
   const scene = new THREE.Scene();
 
-  // Orthographic camera: top-down 2D view
-  const frustumSize = 2000; // default zoom in meters
-  const camera = new THREE.OrthographicCamera();
-  camera.position.z = 100;
-  camera.lookAt(0, 0, 0);
+  // World 根节点 — Floating Origin 偏移锚点（设计文档 §7.2）
+  // 所有 tile group 与十字准星挂在 worldRoot 下，worldRoot.position = -floatingOrigin，
+  // 使子节点的最终世界坐标都是相机附近的小数值，避免 float32 精度损失。
+  // 注意：相机不能挂在 worldRoot 下 — OrbitControls 内部 lookAt(target) 把 target 当世界坐标，
+  // 若相机父节点带偏移会导致朝向错误。相机保持在 CRS 坐标，仅在渲染瞬间临时偏移到局部坐标。
+  const worldRoot = new THREE.Group();
+  scene.add(worldRoot);
 
-  // Crosshair
+  // PerspectiveMapController: PerspectiveCamera + OrbitControls
+  const mapController = new PerspectiveMapController({
+    center: { x: 500000, y: 3650000 },
+    distance: 20000,
+    maxPolarAngle: Math.PI / 2.4,
+    fov: 70,
+    near: 100,
+    far: 5e7,
+  });
+  const camera = mapController.camera;
+  // 相机不加入场景图：始终在 CRS 坐标操作（OrbitControls 交互逻辑完全不受影响），
+  // 渲染时临时减去 floatingOrigin 偏移到局部坐标（见 render()）。
+
+  // Crosshair — follows controls.target（CRS 坐标，相对 worldRoot）
   const crosshair = createCrosshair();
-  scene.add(crosshair);
+  worldRoot.add(crosshair);
 
-  // ── Sizing ─────────────────────────────────────────────────
-  function size() {
-    const cw = app.clientWidth;
-    const ch = app.clientHeight;
-    renderer.setSize(cw, ch, false);
-
-    const aspect = cw / ch;
-    camera.left = (-frustumSize * aspect) / 2;
-    camera.right = (frustumSize * aspect) / 2;
-    camera.top = frustumSize / 2;
-    camera.bottom = -frustumSize / 2;
-    camera.near = 0.1;
-    camera.far = 1e6;
+  // Sizing — 同步 drawing buffer 到容器尺寸（CSS 负责拉伸显示）
+  function onResize() {
+    const w = app.clientWidth || window.innerWidth;
+    const h = app.clientHeight || window.innerHeight;
+    renderer.setSize(w, h, false);
+    camera.aspect = w / Math.max(h, 1);
     camera.updateProjectionMatrix();
   }
-  size();
-  window.addEventListener("resize", size);
+  new ResizeObserver(onResize).observe(app);
+  onResize();
 
   // ── Layers ─────────────────────────────────────────────────
-  // Layer 1: OSM basemap (XYZTileScheme)
+  // Layer 1: 底图 (XYZTileScheme)
+  // 默认使用 ArcGis World_Imagery 卫星影像（无需 token，服务稳定）。
+  // 注意 ArcGis 瓦片 URL 为 {z}/{y}/{x} 顺序（y 在 x 前）。
   const osmScheme = new XYZTileScheme(crs, 0, 18);
   const osmSource = new XYZTileSource(
-    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    "https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
     { minZoom: 0, maxZoom: 18 },
   );
+  // 备选底图源（参考 three-tile plugin/mapSource）：
+  //   OSM:        https://tile.openstreetmap.org/{z}/{x}/{y}.png
+  //   MapTiler:   https://api.maptiler.com/tiles/satellite-v2/{z}/{x}/{y}.jpg?key=<token>
+  //   天地图:     https://t{0-4}.tianditu.gov.cn/DataServer?T=img_w&x={x}&y={y}&l={z}&tk=<token>
+  //   （MapTiler/天地图需申请 token；XYZTileSource 支持 {z}/{x}/{y}/{-y} 模板）
   const osmRenderer = new RasterRenderer({
     name: "osm-renderer",
-    quality: new SubdividedPlane(8), // 8×8 subdivision for accurate XYZ→GCJ38 reprojection
+    // 自适应细分（设计文档 §3.5）：低缩放级别（全球视图）自动加密网格，
+    // 消除 XYZ→GK38 重投影在低 zoom 下的横向条纹/擕裂伪影。
+    quality: new SubdividedPlane(8, true),
   });
 
   const osmLayer = new RasterLayer({
@@ -427,6 +444,9 @@ async function main() {
     const renderer = layer.renderer;
     const data = await source.fetch(tile.key, tile.bounds, signal);
     if (signal.aborted) return null;
+    // 空数据（如矢量瓦片裁剪后无要素）跳过内容创建，避免空 TileContent 被计数。
+    // 仅对数组型数据（GeoFeature[]）生效；栅格/棋盘格返回对象不受影响。
+    if (Array.isArray(data) && data.length === 0) return null;
     return renderer.createContent(data, tile);
   };
 
@@ -444,11 +464,7 @@ async function main() {
         layers: [osmLayer, checkerLayer, vectorLayer],
       },
     ],
-    cameraController: new MapCameraController({
-      x: 500000,
-      y: 3650000,
-      zoom: 10,
-    }),
+    cameraController: mapController,
   });
 
   engine.start();
@@ -457,9 +473,31 @@ async function main() {
   // 跟踪已添加到场景的 tile group
   const sceneTiles = new Map<string, THREE.Group>();
 
+  /** 遍历 group 内所有渲染对象的材质 */
+  function forEachMaterial(
+    group: THREE.Group,
+    fn: (mat: THREE.Material) => void,
+  ) {
+    group.traverse((child) => {
+      if (
+        child instanceof THREE.Mesh ||
+        child instanceof THREE.Line ||
+        child instanceof THREE.Points
+      ) {
+        const mat = child.material as THREE.Material;
+        if (mat && "opacity" in mat) fn(mat);
+      }
+    });
+  }
+
   function syncScene() {
     const loaded = engine.tileManager.loadedTiles;
     const origin = engine.floatingOrigin.current;
+
+    // Floating Origin 偏移：worldRoot.position = -origin（设计文档 §7.2）
+    // 相机与 tile group 都是 worldRoot 子节点，最终世界坐标 = CRS - origin（相机附近小数值）。
+    // 只需更新这一个节点，无需逐 tile 遍历（dirty flag 优化亦可，此处每帧赋值代价恒定）。
+    worldRoot.position.set(-origin.x, -origin.y, 0);
 
     // 添加新 tile
     for (const [key, tile] of loaded) {
@@ -481,25 +519,18 @@ async function main() {
 
       if (!hasObjects) continue;
 
-      // 定位 group 于 tile origin（局部坐标 = CRS - floating origin）
-      group.position.set(
-        tile.origin.x - origin.x,
-        tile.origin.y - origin.y,
-        0,
-      );
+      // tile group 位置 = tile.origin（CRS 坐标，相对 worldRoot）
+      // 不需减 floatingOrigin — worldRoot 统一偏移
+      group.position.set(tile.origin.x, tile.origin.y, 0);
 
-      scene.add(group);
+      worldRoot.add(group);
       sceneTiles.set(key, group);
 
-      // 设置初始 opacity = 0（淡入动画起点）
-      group.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          const mat = child.material as THREE.Material;
-          if ("opacity" in mat && "transparent" in mat) {
-            (mat as THREE.MeshBasicMaterial).opacity = 0;
-            mat.transparent = true;
-          }
-        }
+      // 淡入动画起点：记录每个材质的目标透明度，然后置 0
+      forEachMaterial(group, (mat) => {
+        (mat as any).__targetOpacity = mat.opacity;
+        mat.transparent = true;
+        mat.opacity = 0;
       });
       // 存储 content 引用用于淡入动画
       (group as any).__fadeContent = tile.contents[0];
@@ -508,42 +539,54 @@ async function main() {
     // 移除淘汰的 tile（GPU 资源已由 Tile.dispose 释放，此处只从场景移除）
     for (const [key, group] of sceneTiles) {
       if (!loaded.has(key)) {
-        scene.remove(group);
+        worldRoot.remove(group);
         sceneTiles.delete(key);
       }
     }
   }
 
   // ── Render loop ────────────────────────────────────────────
+  // FPS 统计：累计帧数与耗时，每 500ms 刷新一次显示（避免逐帧抖动）
+  const fpsEl = document.getElementById("fps-value")!;
+  const frameTimeEl = document.getElementById("frame-time")!;
+  let fpsFrames = 0;
+  let fpsLastTime = performance.now();
+
   function render() {
-    const cam = engine.cameraController as MapCameraController;
-    const origin = engine.floatingOrigin.current;
+    // ── FPS 统计 ─────────────────────────────────────────
+    fpsFrames++;
+    const fpsNow = performance.now();
+    const fpsElapsed = fpsNow - fpsLastTime;
+    if (fpsElapsed >= 500) {
+      const fps = (fpsFrames * 1000) / fpsElapsed;
+      const frameMs = fpsElapsed / fpsFrames;
+      fpsEl.textContent = fps.toFixed(0);
+      // 按帧率着色：>=50 绿，>=30 黄，<30 红
+      fpsEl.style.color = fps >= 50 ? "#7CFC00" : fps >= 30 ? "#FFD700" : "#FF6B6B";
+      frameTimeEl.textContent = `(${frameMs.toFixed(1)} ms/帧)`;
+      fpsFrames = 0;
+      fpsLastTime = fpsNow;
+    }
 
-    // Update ortho camera frustum to match map zoom
-    const cw = app.clientWidth;
-    const ch = app.clientHeight;
-    const aspect = cw / ch;
-    const halfH = cam.zoom * ch / 2;
-    const halfW = halfH * aspect;
+    // Sync crosshair to controls target（CRS 坐标，相对 worldRoot）
+    // z 保持 90（抬离地面避免与瓦片平面 z-fighting），并按分辨率动态缩放保持固定屏幕尺寸。
+    const tgt = mapController.controls.target;
+    crosshair.position.set(tgt.x, tgt.y, 90);
+    const crosshairScale = Math.max(mapController.resolution, 1) * 0.9; // ≈14px 半长
+    crosshair.scale.setScalar(crosshairScale);
 
-    camera.left = -halfW;
-    camera.right = halfW;
-    camera.top = halfH;
-    camera.bottom = -halfH;
-    camera.updateProjectionMatrix();
-
-    // Move camera to follow map position (in floating-origin space)
-    camera.position.set(
-      cam.cameraWorldPos.x - origin.x,
-      cam.cameraWorldPos.y - origin.y,
-      camera.position.z,
-    );
-
-    // Sync tile meshes
+    // Sync tile meshes（worldRoot.position = -origin）
     syncScene();
 
-    // Render
+    // 渲染瞬间将相机临时偏移到局部坐标（相机平时在 CRS 坐标，OrbitControls 不受影响）。
+    // 相机与 worldRoot 子节点（瓦片/准星）同处局部坐标系，相对视图正确；
+    // 平移不改变朝向，故 OrbitControls 计算的 quaternion 无需调整。
+    const origin = engine.floatingOrigin.current;
+    camera.position.x -= origin.x;
+    camera.position.y -= origin.y;
     renderer.render(scene, camera);
+    camera.position.x += origin.x;
+    camera.position.y += origin.y;
 
     // ── Fade-in animation (300ms) ─────────────────────────
     const FADE_DURATION = 300;
@@ -552,32 +595,29 @@ async function main() {
       const content = (group as any).__fadeContent;
       if (!content) continue;
       const elapsed = now - content.createdAt;
-      if (elapsed >= FADE_DURATION) {
-        // Fully visible — remove fade tracking
-        delete (group as any).__fadeContent;
-        group.traverse((child) => {
-          if (child instanceof THREE.Mesh) {
-            const mat = child.material as THREE.MeshBasicMaterial;
-            if ("opacity" in mat) mat.opacity = 1;
-          }
-        });
-        continue;
-      }
-      const opacity = Math.min(1, elapsed / FADE_DURATION);
-      group.traverse((child) => {
-        if (child instanceof THREE.Mesh) {
-          const mat = child.material as THREE.MeshBasicMaterial;
-          if ("opacity" in mat) mat.opacity = opacity;
+      const done = elapsed >= FADE_DURATION;
+      const progress = done ? 1 : Math.min(1, elapsed / FADE_DURATION);
+
+      forEachMaterial(group, (mat) => {
+        const target: number = (mat as any).__targetOpacity ?? 1;
+        mat.opacity = target * progress;
+        if (done) {
+          // 动画结束：恢复目标透明度 + 原始 transparent 标志
+          mat.opacity = target;
+          mat.transparent = target < 1;
+          delete (mat as any).__targetOpacity;
         }
       });
+
+      if (done) delete (group as any).__fadeContent;
     }
 
     // HUD
     updateHUD(
       crs.name,
-      cam.cameraWorldPos.x,
-      cam.cameraWorldPos.y,
-      cam.zoom,
+      mapController.controls.target.x,
+      mapController.controls.target.y,
+      mapController.resolution,
       engine.tileManager.loadedTiles.size,
       engine.tileManager.scheduler.queueLength,
       engine.tileManager.scheduler.loadingCount,
@@ -593,12 +633,12 @@ async function main() {
 // Helpers
 // ═══════════════════════════════════════════════════════════════
 
-function createCrosshair(): THREE.Line {
+function createCrosshair(): THREE.Object3D {
   const size = 16;
   const material = new THREE.LineBasicMaterial({
     color: 0xffffff,
     transparent: true,
-    opacity: 0.25,
+    opacity: 0.6,
   });
 
   const hPoints = [new THREE.Vector3(-size, 0, 0), new THREE.Vector3(size, 0, 0)];
@@ -612,7 +652,7 @@ function createCrosshair(): THREE.Line {
   group.add(new THREE.Line(vGeo, material));
   group.position.z = 90; // just below camera
 
-  return group as unknown as THREE.Line; // Group extends Object3D, cast for return type
+  return group;
 }
 
 main();

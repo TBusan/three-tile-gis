@@ -19,6 +19,15 @@ export class Tile extends Disposable {
   readonly bounds: CrsBounds;
   /** Local Origin — 本 tile 内所有顶点的参考原点（CRS 坐标） */
   readonly origin: CrsCoord;
+  /**
+   * 重投影函数（可选）— 将归一化瓦片坐标 (u,v ∈ [0,1]) 映射到 CRS 平面坐标。
+   *
+   * 由 XYZTileScheme 提供（设计文档 §3.5）：XYZ 瓦片在 3857 下是正方形，
+   * 投影到目标 CRS 后是弯曲四边形。渲染器用此函数逐顶点计算精确位置，
+   * GPU 在顶点间插值纹理坐标，消除纹理扭曲。
+   * ProjectTileScheme 的瓦片本身就是 CRS 矩形，不需要此函数。
+   */
+  reprojector?: (u: number, v: number) => { x: number; y: number };
   /** 当前生命周期状态 */
   state: TileState;
   /** 各 Layer 创建的内容列表 */

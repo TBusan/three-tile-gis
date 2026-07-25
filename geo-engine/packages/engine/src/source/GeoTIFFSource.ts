@@ -191,7 +191,7 @@ export class GeoTIFFSource implements IDataSource<ImageBitmap> {
    * 将 geotiff.js 的 raster 数组转换为 ImageBitmap
    */
   private async _rastersToBitmap(
-    rasters: Array<Uint8Array | Uint16Array | Float32Array>,
+    rasters: Array<ArrayLike<number>>,
     width: number,
     height: number,
   ): Promise<ImageBitmap> {
@@ -275,7 +275,7 @@ export class GeoTIFFSource implements IDataSource<ImageBitmap> {
   /**
    * 采样单个像素值 — 处理不同数据类型
    */
-  private _sampleBand(band: Uint8Array | Uint16Array | Float32Array, idx: number): number {
+  private _sampleBand(band: ArrayLike<number>, idx: number): number {
     const raw = band[idx];
     if (band instanceof Float32Array) {
       // Float32: assume values in [0, 1] or linear

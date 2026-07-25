@@ -40,4 +40,20 @@ export interface ITileScheme {
    * 获取子 TileKey 列表（更细一级）
    */
   getChildKeys(key: TileKey): TileKey[];
+
+  /**
+   * 可选：获取瓦片的重投影函数（设计文档 §3.5）
+   *
+   * 返回的函数将归一化瓦片坐标 (u,v ∈ [0,1]) 映射到 CRS 平面坐标：
+   *   - u: 0 = 瓦片西边界，1 = 东边界
+   *   - v: 0 = 瓦片南边界，1 = 北边界
+   *
+   * XYZTileScheme 实现此方法（3857 → 目标 CRS 逐顶点重投影），
+   * ProjectTileScheme 不需要（瓦片本身就是 CRS 矩形）。
+   *
+   * @returns 重投影函数，或 null/undefined 表示不需要重投影
+   */
+  getReprojector?(
+    key: TileKey,
+  ): ((u: number, v: number) => { x: number; y: number }) | null;
 }

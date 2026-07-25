@@ -127,7 +127,7 @@ export class DEMSource implements IDataSource<Float32Array> {
   }
 
   private _toFloat32(
-    band: Uint8Array | Uint16Array | Int16Array | Float32Array,
+    band: ArrayLike<number>,
     _width: number,
     _height: number,
   ): Float32Array {

@@ -90,16 +90,19 @@ export class XYZTileSource implements IDataSource<ImageBitmap> {
   /**
    * 根据 TileKey 构建实际 URL
    *
-   * 模板变量 {z} → level, {x} → col, {y} → row,
-   * {-y} → 2^z - 1 - row（Google 反转 y）
+   * 模板变量：
+   *   {z} → zoom 级别
+   *   {x} → 列号
+   *   {y} → 行号（Google/OSM 约定，y=0 在北端 — 与 XYZTileScheme 生成的一致）
+   *   {-y} → TMS 反转行号（2^z - 1 - y，用于 y=0 在南端的 TMS 服务）
    */
   buildUrl(key: TileKey): string {
     const { z, x, y } = this._parseId(key.id);
-    const invY = Math.pow(2, z) - 1 - y;
+    const tmsY = Math.pow(2, z) - 1 - y;
     return this.urlTemplate
       .replace(/\{z\}/g, String(z))
       .replace(/\{x\}/g, String(x))
-      .replace(/\{-y\}/g, String(invY))
+      .replace(/\{-y\}/g, String(tmsY))
       .replace(/\{y\}/g, String(y));
   }
 

@@ -54,6 +54,8 @@ export class Engine {
   private _running = false;
   private _rafId = 0;
   private _lastTime = 0;
+  private _mapUpdateTime = 0;
+  private static readonly UPDATE_INTERVAL_MS = 100;
 
   constructor(config: EngineConfig) {
     this.crs = config.crs;
@@ -181,29 +183,35 @@ export class Engine {
     const dt = (now - this._lastTime) / 1000;
     this._lastTime = now;
 
-    // 1. 更新相机
+    // 1. 每帧更新相机（鼠标响应需要实时）
     this.cameraController.update(dt);
 
-    const extent = this.cameraController.extent;
-    const cameraPos = this.cameraController.cameraWorldPos;
+    // 2-5. Tile 更新 100ms 节流（匹配原始 three-tile 的 updateInterval）
+    const tickElapsed = now - this._mapUpdateTime;
+    if (tickElapsed >= Engine.UPDATE_INTERVAL_MS) {
+      this._mapUpdateTime = now;
 
-    // 2. 更新 Floating Origin
-    this.floatingOrigin.update(cameraPos);
+      const extent = this.cameraController.extent;
+      const cameraPos = this.cameraController.cameraWorldPos;
 
-    // 3. 获取可见图层
-    const layers = this.layerManager.getVisibleLayers();
+      // 更新 Floating Origin
+      this.floatingOrigin.update(cameraPos);
 
-    // 4. TileManager 调度
-    this.tileManager.update(
-      extent,
-      cameraPos,
-      this.crs,
-      layers,
-      this.cameraController.resolution,
-    );
+      // 获取可见图层
+      const layers = this.layerManager.getVisibleLayers();
 
-    // 5. 淘汰超出缓存的 Tile
-    this.tileManager.evict(this._maxCacheBytes);
+      // TileManager 调度
+      this.tileManager.update(
+        extent,
+        cameraPos,
+        this.crs,
+        layers,
+        this.cameraController.resolution,
+      );
+
+      // 淘汰超出缓存的 Tile
+      this.tileManager.evict(this._maxCacheBytes);
+    }
 
     this._rafId = requestAnimationFrame(this._tick);
   };

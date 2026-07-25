@@ -5,6 +5,7 @@ import type { IProjectCRS } from "../crs/IProjectCRS";
 import type { TileKey } from "../tile/TileKey";
 import { tileKeyToString } from "../tile/TileKey";
 import { Tile } from "../tile/Tile";
+import type { TileContent } from "../tile/TileContent";
 import type { ILayer } from "../layer/ILayer";
 import type { ITileCache } from "../tile/ITileCache";
 import type { IFloatingOrigin } from "../origin/IFloatingOrigin";
@@ -49,6 +50,10 @@ export class TileManager {
   private _loadedTiles = new Map<string, Tile>();
   /** In-flight loads: tileKey → { controller, layerIds } */
   private _loading = new Map<string, LoadingEntry>();
+  /** 上一次的视野范围（用于变化检测） */
+  private _lastExtent: CrsBounds | null = null;
+  private _lastResolution: number | null = null;
+  private static readonly EXTENT_MOVE_FACTOR = 0.05;
 
   constructor(
     cache: ITileCache<Tile>,
@@ -78,7 +83,33 @@ export class TileManager {
     layers: ILayer[],
     resolution?: number,
   ): void {
-    // 0. 按依赖拓扑排序图层（无依赖的先处理）
+    // 探测视野是否明显变化（用于决定是否重新生成 tile key 列表）
+    let extentChanged = true;
+    if (this._lastExtent && this._lastResolution != null) {
+      const [lx0, ly0, lx1, ly1] = this._lastExtent;
+      const lw = lx1 - lx0;
+      const lh = ly1 - ly0;
+      const dx = Math.abs(extent[0] - lx0);
+      const dy = Math.abs(extent[1] - ly0);
+      const resChanged =
+        resolution != null &&
+        Math.abs(resolution - this._lastResolution) / this._lastResolution > 0.2;
+      // 平移不超过视野 5% 且缩放变化不超过 20% → 跳过重新调度
+      if (
+        !resChanged &&
+        dx < lw * TileManager.EXTENT_MOVE_FACTOR &&
+        dy < lh * TileManager.EXTENT_MOVE_FACTOR
+      ) {
+        extentChanged = false;
+      }
+    }
+
+    // ── 调度阶段：视野变化时重新生成 tile key 列表并排序 ──
+    if (extentChanged) {
+      this._lastExtent = [...extent] as CrsBounds;
+      this._lastResolution = resolution ?? null;
+
+      // 0. 按依赖拓扑排序图层（无依赖的先处理）
     const sorted = this._sortByDeps(layers);
 
     // 1. 收集候选 TileKey → layerIds（按 key 合并）
@@ -188,8 +219,9 @@ export class TileManager {
 
     // 5. 调度排序
     this.scheduler.schedule(allRequests);
+    } // end if (extentChanged)
 
-    // 6. 取本帧 batch 并加载
+    // ── 加载阶段：始终执行（消费已有队列）──
     const batch = this.scheduler.takeNext();
     for (const req of batch) {
       this._loadTile(req, layers);
@@ -201,14 +233,12 @@ export class TileManager {
     tileKey: TileKey,
     layer: ILayer,
   ): Promise<TileContent | null> {
-    const bounds = layer.tileScheme.getTileBounds(tileKey);
-    const origin: CrsCoord = {
-      x: Math.floor(bounds[0] / 500) * 500,
-      y: Math.floor(bounds[1] / 500) * 500,
-      z: 0,
-    };
+    const scheme = layer.tileScheme;
+    const bounds = scheme.getTileBounds(tileKey);
+    const origin = TileManager._snapOrigin(bounds);
 
     const tile = new Tile(tileKey, bounds, origin);
+    tile.reprojector = scheme.getReprojector?.(tileKey) ?? undefined;
     const controller = new AbortController();
     const content = await this._loadFn(tile, layer, controller.signal);
     if (content) {
@@ -320,13 +350,11 @@ export class TileManager {
       const firstLayer = layers.find((l) => req.layerIds.includes(l.id));
       if (!firstLayer) return;
 
-      const bounds = firstLayer.tileScheme.getTileBounds(req.tileKey);
-      const origin: CrsCoord = {
-        x: Math.floor(bounds[0] / 500) * 500,
-        y: Math.floor(bounds[1] / 500) * 500,
-        z: 0,
-      };
+      const scheme = firstLayer.tileScheme;
+      const bounds = scheme.getTileBounds(req.tileKey);
+      const origin = TileManager._snapOrigin(bounds);
       tile = new Tile(req.tileKey, bounds, origin);
+      tile.reprojector = scheme.getReprojector?.(req.tileKey) ?? undefined;
       isNew = true;
     }
 
@@ -379,5 +407,24 @@ export class TileManager {
       bytes += content.renderObjects.length * 1024;
     }
     return bytes;
+  }
+
+  /**
+   * Local Origin 取整对齐（设计文档 §7.2）
+   *
+   * 将 bounds 最小角对齐到瓦片尺寸 1/4 的整数倍。
+   * 对于 ProjectTileScheme(1000m) 瓦片，对齐到 250m 网格；
+   * 对于低 zoom 的 XYZ 瓦片（跨度数十公里），对齐到更大的网格，
+   * 保证局部坐标始终是小数值（GPU 安全）。
+   */
+  private static _snapOrigin(bounds: CrsBounds): CrsCoord {
+    const w = bounds[2] - bounds[0];
+    const h = bounds[3] - bounds[1];
+    const snap = Math.max(1, Math.min(w, h) / 4);
+    return {
+      x: Math.floor(bounds[0] / snap) * snap,
+      y: Math.floor(bounds[1] / snap) * snap,
+      z: 0,
+    };
   }
 }

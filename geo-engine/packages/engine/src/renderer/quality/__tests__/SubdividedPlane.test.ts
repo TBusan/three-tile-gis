@@ -1,6 +1,7 @@
 // geo-engine/packages/engine/src/renderer/quality/__tests__/SubdividedPlane.test.ts
 
 import { describe, it, expect } from "vitest";
+import * as THREE from "three";
 import { SubdividedPlane } from "../SubdividedPlane";
 import type { CrsBounds, CrsCoord } from "../../../core/types";
 
@@ -84,24 +85,44 @@ describe("SubdividedPlane", () => {
     expect(uv.getY(lastIdx)).toBeCloseTo(1, 5);
   });
 
-  it("should clamp gridSize to [2, 16]", () => {
+  it("should clamp gridSize to [2, 64]", () => {
     expect(new SubdividedPlane(0).gridSize).toBe(2);
     expect(new SubdividedPlane(1).gridSize).toBe(2);
-    expect(new SubdividedPlane(20).gridSize).toBe(16);
-    expect(new SubdividedPlane(100).gridSize).toBe(16);
+    expect(new SubdividedPlane(20).gridSize).toBe(20);
+    expect(new SubdividedPlane(100).gridSize).toBe(64);
     expect(new SubdividedPlane(8).gridSize).toBe(8);
   });
 
-  it("gridSizeForZoom should return correct values", () => {
-    expect(SubdividedPlane.gridSizeForZoom(0)).toBe(8);
-    expect(SubdividedPlane.gridSizeForZoom(2)).toBe(8);
-    expect(SubdividedPlane.gridSizeForZoom(4)).toBe(8);
-    expect(SubdividedPlane.gridSizeForZoom(5)).toBe(6);
-    expect(SubdividedPlane.gridSizeForZoom(8)).toBe(6);
+  it("gridSizeForZoom should return finer grid for lower zoom", () => {
+    // 低 zoom（全球视图）→ 更细网格；高 zoom → 更粗
+    expect(SubdividedPlane.gridSizeForZoom(0)).toBe(48);
+    expect(SubdividedPlane.gridSizeForZoom(1)).toBe(48);
+    expect(SubdividedPlane.gridSizeForZoom(2)).toBe(32);
+    expect(SubdividedPlane.gridSizeForZoom(3)).toBe(32);
+    expect(SubdividedPlane.gridSizeForZoom(4)).toBe(16);
+    expect(SubdividedPlane.gridSizeForZoom(5)).toBe(16);
+    expect(SubdividedPlane.gridSizeForZoom(8)).toBe(8);
     expect(SubdividedPlane.gridSizeForZoom(9)).toBe(4);
-    expect(SubdividedPlane.gridSizeForZoom(12)).toBe(4);
-    expect(SubdividedPlane.gridSizeForZoom(13)).toBe(2);
+    expect(SubdividedPlane.gridSizeForZoom(11)).toBe(4);
+    expect(SubdividedPlane.gridSizeForZoom(12)).toBe(2);
     expect(SubdividedPlane.gridSizeForZoom(20)).toBe(2);
+  });
+
+  it("adaptive mode should pick grid density from level", () => {
+    const adaptive = new SubdividedPlane(4, true);
+    // level 0（全球）→ gridSizeForZoom(0)=48 → (48+1)²=2401 顶点
+    const geoLow = adaptive.createGeometry(bounds, origin, undefined, 0);
+    expect(geoLow.getAttribute("position").count).toBe(2401);
+    // level 13（近距）→ gridSizeForZoom(13)=2 → 9 顶点
+    const geoHigh = adaptive.createGeometry(bounds, origin, undefined, 13);
+    expect(geoHigh.getAttribute("position").count).toBe(9);
+  });
+
+  it("non-adaptive mode should ignore level", () => {
+    const fixed = new SubdividedPlane(4); // adaptive 默认 false
+    // 即使传入 level 0，仍用固定 gridSize=4 → 25 顶点
+    const geo = fixed.createGeometry(bounds, origin, undefined, 0);
+    expect(geo.getAttribute("position").count).toBe(25);
   });
 
   it("should compute vertex normals", () => {

@@ -51,7 +51,15 @@ export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
     texture.colorSpace = THREE.SRGBColorSpace;
 
     // 2. 创建几何体（局部坐标）
-    const geometry = this.quality.createGeometry(tile.bounds, tile.origin);
+    // XYZ 瓦片：tile.reprojector 提供逐顶点重投影（设计文档 §3.5）
+    // Project 瓦片：reprojector 为 undefined，线性插值 bounds
+    // 传入 tile.key.level 供自适应质量层按缩放级别选择网格密度（低 zoom 更细）
+    const geometry = this.quality.createGeometry(
+      tile.bounds,
+      tile.origin,
+      tile.reprojector,
+      tile.key.level,
+    );
 
     // 3. 创建材质
     const material = new THREE.MeshBasicMaterial({

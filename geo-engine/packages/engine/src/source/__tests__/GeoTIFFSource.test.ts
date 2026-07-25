@@ -10,27 +10,29 @@ import type { CrsBounds } from "../../core/types";
 // Use vitest's `globalThis` to define ImageData and createImageBitmap for Node
 const { createImageBitmap: _realCIB } = globalThis as any;
 
+// FakeImageData 定义在模块作用域，供 beforeAll 内两个 polyfill 分支共同引用
+class FakeImageData {
+  readonly data: Uint8ClampedArray;
+  readonly width: number;
+  readonly height: number;
+  readonly colorSpace = "srgb" as PredefinedColorSpace;
+  constructor(width: number, height: number);
+  constructor(data: Uint8ClampedArray, width: number, height?: number);
+  constructor(wd: number | Uint8ClampedArray, h: number, _h2?: number) {
+    if (wd instanceof Uint8ClampedArray) {
+      this.width = h;
+      this.height = _h2 ?? 0;
+      this.data = wd;
+    } else {
+      this.width = wd;
+      this.height = h;
+      this.data = new Uint8ClampedArray(wd * h * 4);
+    }
+  }
+}
+
 beforeAll(() => {
   if (typeof ImageData === "undefined") {
-    class FakeImageData {
-      readonly data: Uint8ClampedArray;
-      readonly width: number;
-      readonly height: number;
-      readonly colorSpace = "srgb" as PredefinedColorSpace;
-      constructor(width: number, height: number);
-      constructor(data: Uint8ClampedArray, width: number, height?: number);
-      constructor(wd: number | Uint8ClampedArray, h: number, _h2?: number) {
-        if (wd instanceof Uint8ClampedArray) {
-          this.width = h;
-          this.height = _h2 ?? 0;
-          this.data = wd;
-        } else {
-          this.width = wd;
-          this.height = h;
-          this.data = new Uint8ClampedArray(wd * h * 4);
-        }
-      }
-    }
     // @ts-expect-error: polyfill for Node test environment
     globalThis.ImageData = FakeImageData;
   }

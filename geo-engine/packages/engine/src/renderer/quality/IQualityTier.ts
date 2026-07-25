@@ -21,7 +21,17 @@ export interface IQualityTier {
    *
    * @param bounds — Tile 在 CRS 空间中的包围盒
    * @param origin — Tile 的局部原点（CRS 坐标）
+   * @param reprojector — 可选重投影函数（归一化瓦片坐标 → CRS 坐标）。
+   *   XYZ 瓦片投影到目标 CRS 后是弯曲四边形，提供此函数时
+   *   应逐顶点计算精确位置（设计文档 §3.5）；不提供时线性插值 bounds。
+   * @param level — 可选瓦片缩放级别（XYZ zoom）。供自适应细分的质量层
+   *   根据级别选择网格密度：level 越小（视野越大）→ 投影弯曲越剧烈 → 需更细网格。
    * @returns BufferGeometry，所有顶点在局部坐标中
    */
-  createGeometry(bounds: CrsBounds, origin: CrsCoord): THREE.BufferGeometry;
+  createGeometry(
+    bounds: CrsBounds,
+    origin: CrsCoord,
+    reprojector?: (u: number, v: number) => { x: number; y: number },
+    level?: number,
+  ): THREE.BufferGeometry;
 }

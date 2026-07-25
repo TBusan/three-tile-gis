@@ -41,6 +41,7 @@ function makeMockScheme(schemeId: string) {
       }
       return null;
     },
+    getChildKeys: (): TileKey[] => [],
   };
 }
 
@@ -67,7 +68,7 @@ function makeMockLayer(
     },
     renderer: {
       name: "test-renderer",
-      createContent: async () => null,
+      createContent: async (): Promise<any> => null,
       disposeContent: () => {},
     },
     dependsOn: [],
@@ -252,7 +253,7 @@ describe("TileManager", () => {
       },
       renderer: {
         name: "test",
-        createContent: async () => null,
+        createContent: async (): Promise<any> => null,
         disposeContent: () => {},
       },
       dependsOn: [],
@@ -316,7 +317,7 @@ describe("TileManager", () => {
       },
       renderer: {
         name: "test",
-        createContent: async () => null,
+        createContent: async (): Promise<any> => null,
         disposeContent: () => {},
       },
       dependsOn: [],

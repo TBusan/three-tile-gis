@@ -44,10 +44,15 @@ export class ProjectTileScheme implements ITileScheme {
   }
 
   /**
-   * 根据分辨率选择合适的 tile 级别
+   * 根据分辨率选择合适的 tile 级别（LOD）
    *
-   * 目标：让每个 tile 在屏幕上约占 TARGET_PIXELS 像素
-   * level 0 = baseTileSize 米/tile，每增加 1 级 tile 大小加倍
+   * 目标：让每个 tile 在屏幕上约占 TARGET_PIXELS 像素。
+   * level 0 = baseTileSize 米/tile（最细），每增加 1 级 tile 大小加倍（越粗）。
+   *
+   * 推导：希望 tileSizeAtLevel(level) ≈ idealTileSize
+   *   baseTileSize × 2^level ≈ resolution × TARGET_PIXELS
+   *   => level ≈ log2(idealTileSize / baseTileSize)
+   * 远相机 resolution 大 → idealTileSize 大 → level 高 → 粗瓦片 → 数量少（正确的 LOD 方向）。
    *
    * @param resolution — 当前分辨率（米/像素），0 表示未指定（返回第 0 级）
    */
@@ -55,10 +60,7 @@ export class ProjectTileScheme implements ITileScheme {
     if (resolution <= 0) return 0;
     const TARGET_PIXELS = 256;
     const idealTileSize = resolution * TARGET_PIXELS;
-    if (idealTileSize >= this.baseTileSize) return 0;
-    const level = Math.round(
-      Math.log2(this.baseTileSize / idealTileSize),
-    );
+    const level = Math.round(Math.log2(idealTileSize / this.baseTileSize));
     return Math.max(0, level);
   }
 
@@ -71,10 +73,12 @@ export class ProjectTileScheme implements ITileScheme {
 
     const [col, row] = this._parseId(key.id);
     const size = this.tileSizeAtLevel(key.level);
+    // 与 _getTilesAtLevel 中 row = floor(y / size) 保持一致：
+    // row 直接对应 y 正向（北向），不取反
     const xmin = col * size;
-    const ymin = -(row + 1) * size;
+    const ymin = row * size;
     const xmax = (col + 1) * size;
-    const ymax = -row * size;
+    const ymax = (row + 1) * size;
 
     return [xmin, ymin, xmax, ymax];
   }
@@ -146,10 +150,12 @@ export class ProjectTileScheme implements ITileScheme {
   }
 
   private _parseId(id: string): [number, number] {
-    const parts = id.split("-");
-    if (parts.length !== 2) {
+    // 使用正则而非 split("-")：瓦片索引在 CRS 负半轴可为负数（如 "-1-11"），
+    // split("-") 会把 "-1-11" 拆成 ["", "1", "11"] 导致误报。
+    const m = /^(-?\d+)-(-?\d+)$/.exec(id);
+    if (!m) {
       throw new Error(`Invalid ProjectTileKey id: "${id}"`);
     }
-    return [parseInt(parts[0], 10), parseInt(parts[1], 10)];
+    return [parseInt(m[1], 10), parseInt(m[2], 10)];
   }
 }

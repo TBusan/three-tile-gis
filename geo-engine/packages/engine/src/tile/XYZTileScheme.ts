@@ -38,6 +38,12 @@ export class XYZTileScheme implements ITileScheme {
   /** 包围盒采样分辨率 */
   private static readonly SAMPLE_GRID = 5;
 
+  /** 稳定的 zoom 级别（带迟滞，防止边界振荡） */
+  private _stableZoom: number | null = null;
+
+  /** 缓存的 WebMercator 实例（避免每次调用重新分配） */
+  private readonly _wm = new WebMercatorCRS();
+
   constructor(targetCrs: IProjectCRS, minZoom = 0, maxZoom = 18) {
     this.targetCrs = targetCrs;
     this.minZoom = minZoom;
@@ -70,7 +76,7 @@ export class XYZTileScheme implements ITileScheme {
     ];
 
     // 2. lon/lat → 3857 米
-    const wm = new WebMercatorCRS();
+    const wm = this._wm;
     const mercPoints: Array<{ x: number; y: number }> = [];
     for (const pt of samplePts) {
       const geo = targetCrs.unproject(pt.x, pt.y);
@@ -133,7 +139,7 @@ export class XYZTileScheme implements ITileScheme {
     const wmYmin = wmYmax - tileSize; // 南边界
 
     // 采样 N×N 网格 → lon/lat → 目标 CRS → 计算包围盒
-    const wm = new WebMercatorCRS();
+    const wm = this._wm;
     let minX = Infinity,
       minY = Infinity,
       maxX = -Infinity,
@@ -185,6 +191,39 @@ export class XYZTileScheme implements ITileScheme {
     return children;
   }
 
+  /**
+   * 重投影函数（设计文档 §3.5）
+   *
+   * 将归一化瓦片坐标 (u,v) 映射到目标 CRS 平面坐标：
+   *   (u,v) → 3857 米坐标 → lon/lat → 目标 CRS
+   *
+   * u: 0 = 瓦片西边界，1 = 东边界
+   * v: 0 = 瓦片南边界，1 = 北边界（与 Three.js UV 约定一致：纹理底部 = 南侧）
+   */
+  getReprojector(
+    key: TileKey,
+  ): ((u: number, v: number) => { x: number; y: number }) | null {
+    const { z, x, y } = this._parseId(key.id);
+    const { WORLD_HALF, WORLD_SIZE } = XYZTileScheme;
+
+    // EPSG:3857 空间中瓦片的精确范围
+    const tileSize = WORLD_SIZE / Math.pow(2, z);
+    const wmXmin = -WORLD_HALF + x * tileSize;
+    // y=0 在北端（Google/OSM 约定），南边界 = 北边界 - tileSize
+    const wmYmax = WORLD_HALF - y * tileSize;
+    const wmYmin = wmYmax - tileSize;
+
+    const wm = this._wm;
+    const crs = this.targetCrs;
+
+    return (u: number, v: number) => {
+      const mx = wmXmin + u * tileSize;
+      const my = wmYmin + v * tileSize;
+      const geo = wm.unproject(mx, my);
+      return crs.project(geo.lon, geo.lat);
+    };
+  }
+
   // ---- private ----
 
   /**
@@ -196,10 +235,24 @@ export class XYZTileScheme implements ITileScheme {
     if (viewWidth <= 0) return this.maxZoom;
 
     const { WORLD_SIZE } = XYZTileScheme;
-    // numTiles = viewWidth / (WORLD_SIZE / 2^z) = viewWidth * 2^z / WORLD_SIZE
-    // 2^z = 4 * WORLD_SIZE / viewWidth
     const targetZ = Math.log2((4 * WORLD_SIZE) / viewWidth);
-    return Math.max(this.minZoom, Math.min(this.maxZoom, Math.round(targetZ)));
+    const idealZ = Math.round(targetZ);
+
+    // 迟滞（hysteresis）：防止 zoom 在相邻级别间反复振荡
+    // 当 targetZ 在两级 boundary ±0.3 内时，保持上一帧的 zoom 级别
+    if (this._stableZoom !== null) {
+      const diff = idealZ - this._stableZoom;
+      if (Math.abs(diff) === 1) {
+        const boundary = this._stableZoom + diff * 0.5;
+        if (Math.abs(targetZ - boundary) < 0.3) {
+          return this._stableZoom;
+        }
+      }
+    }
+
+    const z = Math.max(this.minZoom, Math.min(this.maxZoom, idealZ));
+    this._stableZoom = z;
+    return z;
   }
 
   private _parseId(id: string): { z: number; x: number; y: number } {
