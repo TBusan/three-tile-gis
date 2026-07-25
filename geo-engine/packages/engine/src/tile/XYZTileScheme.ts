@@ -80,9 +80,15 @@ export class XYZTileScheme implements ITileScheme {
     const mercPoints: Array<{ x: number; y: number }> = [];
     for (const pt of samplePts) {
       const geo = targetCrs.unproject(pt.x, pt.y);
-      const mp = wm.project(geo.lon, geo.lat);
+      // 钳位经/纬度到有效范围，过滤投影域外的无效坐标
+      if (isNaN(geo.lon) || isNaN(geo.lat)) continue;
+      const lon = Math.max(-180, Math.min(180, geo.lon));
+      const lat = Math.max(-85.06, Math.min(85.06, geo.lat));
+      const mp = wm.project(lon, lat);
       mercPoints.push(mp);
     }
+    // 所有采样点都在投影域外 → 无可见 tile
+    if (mercPoints.length === 0) return [];
 
     // 3. 计算 3857 包围盒
     let minX = Infinity,

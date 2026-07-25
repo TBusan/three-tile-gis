@@ -82,9 +82,19 @@ export class PerspectiveMapController implements ICameraController {
     };
   }
 
+  /** Web Mercator 半周长（≈地球半周长）— extent 超此值无实际意义 */
+  private static readonly MAX_EXTENT_HALF = 20_037_508.34;
+
   /**
-   * CRS 空间视野范围（近似）。
-   * 从相机 FOV + target 距离推算地面（z=0）覆盖范围。
+   * CRS 空间视野范围。
+   *
+   * 从相机 FOV + target 距离推算地面（z=0）覆盖范围的矩形近似，
+   * 再用 MAX_EXTENT_HALF 硬钳位防止 extent 在远距离时无限膨胀。
+   *
+   * 注：这是简化近似（假定垂直俯视），在 pitch 较大时 extent 会偏高估，
+   * 但 MAX_EXTENT_HALF 钳位保证了不会爆炸。更精确的射线-地面交线方法
+   * 在复杂 camera 矩阵状态（如 render() 中的临时相机偏移）下可能引入
+   * Three.js matrixWorld 更新开销，留待后续优化。
    */
   get extent(): [number, number, number, number] {
     const target = this.controls.target;
@@ -93,11 +103,14 @@ export class PerspectiveMapController implements ICameraController {
     const halfH = Math.tan(vFov / 2) * dist;
     const aspect = this.camera.aspect;
     const halfW = halfH * aspect;
+
+    // 硬钳位：防止单次 extent 超过半个地球周长
+    const MAX = PerspectiveMapController.MAX_EXTENT_HALF;
     return [
-      target.x - halfW, // xmin
-      target.y - halfH, // ymin
-      target.x + halfW, // xmax
-      target.y + halfH, // ymax
+      Math.max(target.x - MAX, target.x - halfW),
+      Math.max(target.y - MAX, target.y - halfH),
+      Math.min(target.x + MAX, target.x + halfW),
+      Math.min(target.y + MAX, target.y + halfH),
     ];
   }
 

@@ -55,6 +55,9 @@ export class TileManager {
   private _lastResolution: number | null = null;
   private static readonly EXTENT_MOVE_FACTOR = 0.05;
 
+  /** 单帧最大瓦片总数 — 安全帽防止多图层叠加超出合理内存 */
+  private static readonly MAX_TOTAL_TILES = 8192;
+
   constructor(
     cache: ITileCache<Tile>,
     floatingOrigin: IFloatingOrigin,
@@ -137,14 +140,17 @@ export class TileManager {
         if (ready.length === 0) continue;
         // 继续用 ready 列表处理（只处理依赖就绪的）
         for (const key of ready) {
+          if (keyToLayerIds.size >= TileManager.MAX_TOTAL_TILES) break;
           this._addKeyRequest(key, layer, keyToLayerIds);
         }
         continue;
       }
 
       for (const key of keys) {
+        if (keyToLayerIds.size >= TileManager.MAX_TOTAL_TILES) break;
         this._addKeyRequest(key, layer, keyToLayerIds);
       }
+      if (keyToLayerIds.size >= TileManager.MAX_TOTAL_TILES) break;
     }
 
     // 2. 取消离开视野的加载中 Tile + 清除队列

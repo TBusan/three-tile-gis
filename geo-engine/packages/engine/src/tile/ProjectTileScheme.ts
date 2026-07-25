@@ -126,6 +126,9 @@ export class ProjectTileScheme implements ITileScheme {
 
   // ---- private ----
 
+  /** 单层最大瓦片数 — 超限则递归升 level 使用更粗粒度 LOD */
+  private static readonly MAX_TILES_PER_LAYER = 4096;
+
   private _getTilesAtLevel(extent: CrsBounds, level: number): TileKey[] {
     const size = this.tileSizeAtLevel(level);
     // 在 CRS 平面中，row 索引 y 向（北向）
@@ -139,6 +142,16 @@ export class ProjectTileScheme implements ITileScheme {
     const colMax = Math.floor(xMax / size);
     const rowMin = Math.floor(yMin / size);
     const rowMax = Math.floor(yMax / size);
+
+    const nCols = colMax - colMin + 1;
+    const nRows = rowMax - rowMin + 1;
+
+    // 超限 → 升一级 LOD（瓦片更大、数量更少），递归直到满足上限
+    // 这比裁切 extent 更好：用户不会看到视野边缘的瓦片"消失"，
+    // 只是远距离时使用更粗粒度的 LOD。
+    if (nCols * nRows > ProjectTileScheme.MAX_TILES_PER_LAYER) {
+      return this._getTilesAtLevel(extent, level + 1);
+    }
 
     const keys: TileKey[] = [];
     for (let row = rowMin; row <= rowMax; row++) {
