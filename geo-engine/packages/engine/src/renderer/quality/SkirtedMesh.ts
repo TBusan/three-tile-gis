@@ -116,7 +116,8 @@ export class SkirtedMesh implements IQualityTier {
     const terrainTriCount = N * N * 2;
     const skirtTriCount = 4 * N * 2; // 4 edges × N segments × 2 triangles
     const totalTriCount = terrainTriCount + skirtTriCount;
-    const indices = new Uint16Array(totalTriCount * 3);
+    // 使用 Uint32Array 与 SubdividedPlane/DemMesh 保持一致，防止顶点数溢出
+    const indices = new Uint32Array(totalTriCount * 3);
 
     let i = 0;
 

@@ -11,13 +11,15 @@ export interface PerspectiveMapControllerOptions {
   center?: { x: number; y: number };
   /** 初始相机距地面高度（米），默认 200km */
   distance?: number;
-  /** 最大俯仰角（弧度），默认接近垂直俯视 */
+  /** 最大俯仰角（弧度），默认 π/2.2（约 82°），GIS 引擎不允许低于地平线 */
   maxPolarAngle?: number;
-  /** 视场角（度），默认 70 */
+  /** 最小俯仰角（弧度），默认 0.15（约 8.6°），防止高海拔时完全锁死旋转 */
+  minPolarAngle?: number;
+  /** 视场角（度），默认 60 */
   fov?: number;
-  /** 近裁剪面（米），默认 100 */
+  /** 近裁剪面（米），默认 50 */
   near?: number;
-  /** 远裁剪面（米），默认 5e7 */
+  /** 远裁剪面（米），默认 1e8 */
   far?: number;
 }
 
@@ -38,15 +40,24 @@ export class PerspectiveMapController implements ICameraController {
   private _container: HTMLElement | null = null;
   private _resizeObserver: ResizeObserver | null = null;
 
+  /** 用户配置的最大俯仰角上限（弧度） */
+  private readonly _userMaxPolar: number;
+  /** 最小俯仰角下限（弧度），防止高海拔时旋转完全锁死 */
+  private readonly _minPolarAngle: number;
+
   constructor(options: PerspectiveMapControllerOptions = {}) {
     const {
       center = { x: 0, y: 0 },
       distance = 2e5,
-      maxPolarAngle = Math.PI / 2.4,
-      fov = 70,
-      near = 100,
-      far = 5e7,
+      maxPolarAngle = Math.PI / 2.2,
+      minPolarAngle = 0.15,
+      fov = 60,
+      near = 50,
+      far = 1e8,
     } = options;
+
+    this._userMaxPolar = maxPolarAngle;
+    this._minPolarAngle = minPolarAngle;
 
     // Camera：XY 平面为地面，Z 轴为高度
     this.camera = new THREE.PerspectiveCamera(fov, 1, near, far);
@@ -59,6 +70,7 @@ export class PerspectiveMapController implements ICameraController {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.maxPolarAngle = maxPolarAngle;
+    this.controls.minPolarAngle = 0; // 允许完全俯视
     // 鼠标映射：LEFT = PAN, RIGHT = ROTATE, MIDDLE = DOLLY
     this.controls.mouseButtons = {
       LEFT: THREE.MOUSE.PAN,
@@ -66,7 +78,7 @@ export class PerspectiveMapController implements ICameraController {
       RIGHT: THREE.MOUSE.ROTATE,
     };
     this.controls.minDistance = 100;
-    this.controls.maxDistance = 3e7;
+    this.controls.maxDistance = 5e7;
     this.controls.panSpeed = 1.0;
     this.controls.rotateSpeed = 0.5;
     this.controls.zoomSpeed = 1.2;
@@ -151,12 +163,23 @@ export class PerspectiveMapController implements ICameraController {
 
   update(_deltaTime: number): void {
     // 动态 polar angle：高空限制俯视，低空允许倾斜
+    // GIS 引擎设计约束：
+    //   1. 相机永远不能低于地平线（maxPolarAngle ≤ π/2）
+    //   2. 高海拔时逐步限制为俯视，但保留最小可操作角度
+    //   3. 低海拔时允许较大倾斜（但不超过用户配置上限）
     const dist = this.camera.position.distanceTo(this.controls.target);
-    // 匹配原始 three-tile: maxPolarAngle = min((10_000_000 / dist)^2, π/2.2)
-    const dynamicMax = Math.min(
-      Math.pow(1e7 / Math.max(dist, 100), 2),
-      Math.PI / 2.2,
-    );
+
+    // 动态上限：距离越远 → 越限制为俯视
+    // 使用 sqrt 而非 pow(2) 使过渡更平滑：
+    //   dist=5000 → 允许约 81°（近地面，自由倾斜）
+    //   dist=50000 → 允许约 72°
+    //   dist=5e6 → 允许约 45°
+    //   dist=5e7 → 允许约 14°（全球视图，近俯视）
+    const rawMax = this._userMaxPolar * Math.min(1, Math.sqrt(1e6 / Math.max(dist, 100)));
+    // 钳位到 [_minPolarAngle, _userMaxPolar]，保证：
+    //   - 不低于最小可操作角度（防止锁死）
+    //   - 不超过用户配置上限（GIS 不允许低于地平线）
+    const dynamicMax = Math.max(this._minPolarAngle, Math.min(rawMax, this._userMaxPolar));
     this.controls.maxPolarAngle = dynamicMax;
 
     this.controls.update();

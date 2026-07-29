@@ -21,8 +21,13 @@ export class FloatingOrigin implements IFloatingOrigin {
     this._current = options?.initial ?? { x: 0, y: 0, z: 0 };
   }
 
+  /**
+   * 获取当前原点坐标。
+   * 返回内部引用（只读语义），避免每帧创建新对象增加 GC 压力。
+   * 调用方不应修改返回值。
+   */
   get current(): CrsCoord {
-    return { ...this._current };
+    return this._current;
   }
 
   get dirty(): boolean {

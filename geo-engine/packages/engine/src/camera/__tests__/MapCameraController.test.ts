@@ -35,9 +35,9 @@ describe("MapCameraController", () => {
 
   it("should clip zoom to valid range", () => {
     const cam = new MapCameraController();
-    cam.setZoom(0.001); // too small → clipped to 0.01
-    expect(cam.zoom).toBe(0.01);
-    cam.setZoom(9999); // too large → clipped to 1000
-    expect(cam.zoom).toBe(1000);
+    cam.setZoom(0.001); // too small → clipped to 0.1
+    expect(cam.zoom).toBe(0.1);
+    cam.setZoom(999999); // too large → clipped to 100000
+    expect(cam.zoom).toBe(100000);
   });
 });

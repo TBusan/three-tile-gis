@@ -26,7 +26,7 @@ import type { ITileScheme } from "./ITileScheme";
  */
 export class XYZTileScheme implements ITileScheme {
   readonly name: string;
-  private readonly schemeId = "xyz";
+  readonly schemeId = "xyz";
   private readonly targetCrs: IProjectCRS;
   readonly minZoom: number;
   readonly maxZoom: number;
@@ -38,11 +38,23 @@ export class XYZTileScheme implements ITileScheme {
   /** 包围盒采样分辨率 */
   private static readonly SAMPLE_GRID = 5;
 
+  /** 单次 getTilesInView 返回的最大瓦片数 — 防止极端视野下生成过多瓦片导致卡顿 */
+  private static readonly MAX_TILES_PER_VIEW = 512;
+
   /** 稳定的 zoom 级别（带迟滞，防止边界振荡） */
   private _stableZoom: number | null = null;
 
+  /** 获取当前稳定的 zoom 级别（供 TileManager 做级别切换淘汰） */
+  get currentZoom(): number | null {
+    return this._stableZoom;
+  }
+
   /** 缓存的 WebMercator 实例（避免每次调用重新分配） */
   private readonly _wm = new WebMercatorCRS();
+
+  /** getTileBounds 结果缓存（同一 z/x/y 的包围盒是确定性的，无需重复计算） */
+  private readonly _boundsCache = new Map<string, CrsBounds>();
+  private static readonly BOUNDS_CACHE_MAX = 1024;
 
   constructor(targetCrs: IProjectCRS, minZoom = 0, maxZoom = 18) {
     this.targetCrs = targetCrs;
@@ -121,6 +133,8 @@ export class XYZTileScheme implements ITileScheme {
     for (let y = yMin; y <= yMax; y++) {
       for (let x = xMin; x <= xMax; x++) {
         keys.push(makeTileKey(this.schemeId, `${z}/${x}/${y}`, z));
+        // 安全帽：超过上限时停止生成（防止极端视野下生成数千瓦片）
+        if (keys.length >= XYZTileScheme.MAX_TILES_PER_VIEW) return keys;
       }
     }
     return keys;
@@ -132,6 +146,10 @@ export class XYZTileScheme implements ITileScheme {
         `TileKey scheme mismatch: expected "${this.schemeId}", got "${key.schemeId}"`,
       );
     }
+
+    // 缓存命中 → 直接返回（同一 z/x/y 的包围盒是确定性的）
+    const cached = this._boundsCache.get(key.id);
+    if (cached) return cached;
 
     const { z, x, y } = this._parseId(key.id);
     const { WORLD_HALF, WORLD_SIZE, SAMPLE_GRID } = XYZTileScheme;
@@ -167,7 +185,15 @@ export class XYZTileScheme implements ITileScheme {
       }
     }
 
-    return [minX, minY, maxX, maxY];
+    const result: CrsBounds = [minX, minY, maxX, maxY];
+
+    // 写入缓存（超过上限时清空重建，简单高效）
+    if (this._boundsCache.size >= XYZTileScheme.BOUNDS_CACHE_MAX) {
+      this._boundsCache.clear();
+    }
+    this._boundsCache.set(key.id, result);
+
+    return result;
   }
 
   getParentKey(key: TileKey): TileKey | null {

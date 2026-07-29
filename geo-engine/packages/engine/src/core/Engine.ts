@@ -31,6 +31,18 @@ export interface EngineConfig {
   tileLoadFn: TileLoadCallback;
   /** CPU 缓存上限（字节），默认 256MB */
   maxCacheBytes?: number;
+  /**
+   * Floating Origin 变化回调（设计文档 §7.2）
+   *
+   * 当相机移动超过 threshold 触发原点更新时调用。
+   * Demo/渲染层应在此回调中更新所有已渲染 Tile Group 的 position：
+   *   group.position.set(
+   *     tile.origin.x - newOrigin.x,
+   *     tile.origin.y - newOrigin.y,
+   *     0
+   *   )
+   */
+  onOriginShift?: (newOrigin: CrsCoord, oldOrigin: CrsCoord) => void;
 }
 
 /**
@@ -51,6 +63,7 @@ export class Engine {
 
   private readonly _container: HTMLElement;
   private readonly _maxCacheBytes: number;
+  private readonly _onOriginShift?: (newOrigin: CrsCoord, oldOrigin: CrsCoord) => void;
   private _running = false;
   private _rafId = 0;
   private _lastTime = 0;
@@ -61,6 +74,7 @@ export class Engine {
     this.crs = config.crs;
     this._container = config.container;
     this._maxCacheBytes = config.maxCacheBytes ?? 256 * 1024 * 1024;
+    this._onOriginShift = config.onOriginShift;
 
     this.floatingOrigin =
       config.floatingOrigin ?? new FloatingOrigin({ threshold: 500 });
@@ -195,7 +209,11 @@ export class Engine {
       const cameraPos = this.cameraController.cameraWorldPos;
 
       // 更新 Floating Origin
-      this.floatingOrigin.update(cameraPos);
+      const oldOrigin = this.floatingOrigin.current;
+      const shifted = this.floatingOrigin.update(cameraPos);
+      if (shifted && this._onOriginShift) {
+        this._onOriginShift(this.floatingOrigin.current, oldOrigin);
+      }
 
       // 获取可见图层
       const layers = this.layerManager.getVisibleLayers();

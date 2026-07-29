@@ -62,8 +62,9 @@ export class DemMesh implements IQualityTier {
     }
 
     // Index buffer: N×N quads → 2N² triangles
+    // 使用 Uint32Array 与 SubdividedPlane 保持一致，防止未来扩展时顶点数溢出
     const triCount = N * N * 2;
-    const indices = new Uint16Array(triCount * 3);
+    const indices = new Uint32Array(triCount * 3);
 
     let i = 0;
     for (let row = 0; row < N; row++) {

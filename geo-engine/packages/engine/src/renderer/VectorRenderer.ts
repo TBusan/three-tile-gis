@@ -34,11 +34,12 @@ export class VectorRenderer implements ILayerRenderer<GeoFeature[]> {
   async createContent(
     features: GeoFeature[],
     tile: Tile,
+    layerId?: string,
   ): Promise<TileContent> {
     const content = new TileContent(
       `vector-${tile.key.id}`,
       tile.key,
-      "vector-layer",
+      layerId ?? "vector-layer",
     );
 
     const ox = tile.origin.x;
@@ -268,8 +269,10 @@ export class VectorRenderer implements ILayerRenderer<GeoFeature[]> {
     const o = obj as THREE.Object3D;
     if (o instanceof THREE.Points || o instanceof THREE.Line) {
       o.geometry.dispose();
+      this._disposeMaterial(o.material);
     } else if (o instanceof THREE.Mesh) {
       o.geometry.dispose();
+      this._disposeMaterial(o.material);
     } else if (o instanceof THREE.Group) {
       o.traverse((child) => {
         if (
@@ -278,8 +281,18 @@ export class VectorRenderer implements ILayerRenderer<GeoFeature[]> {
           child instanceof THREE.Mesh
         ) {
           child.geometry.dispose();
+          this._disposeMaterial((child as THREE.Mesh).material);
         }
       });
+    }
+  }
+
+  /** 释放材质及其关联的纹理 */
+  private _disposeMaterial(mat: THREE.Material | THREE.Material[]): void {
+    if (Array.isArray(mat)) {
+      for (const m of mat) m.dispose();
+    } else if (mat) {
+      mat.dispose();
     }
   }
 }

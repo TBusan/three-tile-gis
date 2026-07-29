@@ -56,7 +56,8 @@ export class MapCameraController implements ICameraController {
       e.preventDefault();
       const factor = e.deltaY > 0 ? 1.1 : 0.9;
       this._zoom *= factor;
-      this._zoom = Math.max(0.01, Math.min(1000, this._zoom));
+      // 范围覆盖街道级（0.1 m/px）到全球级（100km/px）
+      this._zoom = Math.max(0.1, Math.min(100000, this._zoom));
     };
 
     this._onResize = () => {
@@ -113,7 +114,7 @@ export class MapCameraController implements ICameraController {
 
   /** 设置缩放级别（米/像素） */
   setZoom(metersPerPixel: number): void {
-    this._zoom = Math.max(0.01, Math.min(1000, metersPerPixel));
+    this._zoom = Math.max(0.1, Math.min(100000, metersPerPixel));
   }
 
   get zoom(): number {

@@ -113,8 +113,11 @@ export class SubdividedPlane implements IQualityTier {
     }
 
     // Build index buffer: N×N quads → 2N² triangles
+    // 使用 Uint32Array 而非 Uint16Array：
+    // 当前 gridSize 上限 64 时顶点数 4225 未超 Uint16 范围，
+    // 但 Uint32 防止未来扩展或外部调用时溢出，且现代 GPU 均支持 OES_element_index_uint。
     const triCount = N * N * 2;
-    const indices = new Uint16Array(triCount * 3);
+    const indices = new Uint32Array(triCount * 3);
 
     let i = 0;
     for (let row = 0; row < N; row++) {

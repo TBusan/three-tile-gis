@@ -10,6 +10,7 @@ import type { ILayer } from "../layer/ILayer";
 import type { ITileCache } from "../tile/ITileCache";
 import type { IFloatingOrigin } from "../origin/IFloatingOrigin";
 import { TileScheduler, type LoadRequest } from "./TileScheduler";
+import { XYZTileScheme } from "../tile/XYZTileScheme";
 
 /**
  * Tile 加载回调 — 由外部实现实际的数据加载和渲染
@@ -50,13 +51,30 @@ export class TileManager {
   private _loadedTiles = new Map<string, Tile>();
   /** In-flight loads: tileKey → { controller, layerIds } */
   private _loading = new Map<string, LoadingEntry>();
+  /** 失败计数：tileKey string → 连续失败次数 */
+  private _failCounts = new Map<string, number>();
   /** 上一次的视野范围（用于变化检测） */
   private _lastExtent: CrsBounds | null = null;
   private _lastResolution: number | null = null;
   private static readonly EXTENT_MOVE_FACTOR = 0.05;
 
+  /**
+   * Zoom 级别切换跟踪：schemeId → 上一次确认的 zoom。
+   * 用于检测 zoom 变化并触发渐进式淘汰。
+   */
+  private _schemeZooms = new Map<string, number>();
+
+  /**
+   * 渐进式父瓦片占位集合：记录因"渐进式显示"注入的父瓦片 key。
+   * 当其子瓦片加载完成后，父瓦片从 _loadedTiles 中移除。
+   */
+  private _parentPlaceholders = new Set<string>();
+
   /** 单帧最大瓦片总数 — 安全帽防止多图层叠加超出合理内存 */
   private static readonly MAX_TOTAL_TILES = 8192;
+
+  /** 单个 Tile 最大重试次数 — 超过后跳过，避免无限重试持续 404 的瓦片 */
+  private static readonly MAX_FAIL_COUNT = 3;
 
   constructor(
     cache: ITileCache<Tile>,
@@ -174,12 +192,18 @@ export class TileManager {
       const dist = Math.sqrt(dx * dx + dy * dy);
       const area = (bounds[2] - bounds[0]) * (bounds[3] - bounds[1]);
 
+      // 计算父瓦片 key（用于 TileScheduler parentReady 权重）
+      const repLayer = layers.find((l) => layerIds.has(l.id));
+      const parentTileKey = repLayer?.tileScheme.getParentKey(key);
+      const parentStr = parentTileKey ? tileKeyToString(parentTileKey) : undefined;
+
       requests.push({
         tileKey: key,
         layerIds: [...layerIds],
         distanceToCamera: dist,
         screenArea: Math.min(area / 1e6, 1),
         inFrustum: true,
+        parentKey: parentStr,
       });
     }
 
@@ -217,6 +241,8 @@ export class TileManager {
           inFrustum: true,
         });
         childKeys.add(tileKeyToString(req.tileKey));
+        // 标记为渐进式占位父瓦片，子瓦片加载完成后自动移除
+        this._parentPlaceholders.add(parentStr);
       }
     }
 
@@ -225,6 +251,10 @@ export class TileManager {
 
     // 5. 调度排序
     this.scheduler.schedule(allRequests);
+
+    // 6. Zoom 级别切换淘汰 + 父瓦片 refined 退出
+    this._evictStaleZoomLevels(layers, visibleKeys);
+    this._evictRefinedParents();
     } // end if (extentChanged)
 
     // ── 加载阶段：始终执行（消费已有队列）──
@@ -281,6 +311,152 @@ export class TileManager {
 
   // ---- private ----
 
+  /**
+   * Zoom 级别切换淘汰（覆盖率驱动，解决缩放时上下层底图同时显示）
+   *
+   * 核心策略（参考 CesiumJS / Mapbox 的 tile 替换机制）：
+   *   - zoom 变化时不立即移除旧瓦片（避免白屏）
+   *   - 逐个检查旧瓦片：当其空间范围内的新级别瓦片已加载足够多时，才移除
+   *   - 安全超时：即使新瓦片加载失败，5 秒后也强制移除旧瓦片
+   *
+   * 对于放大（z → z+1）：一个旧瓦片对应 4 个子瓦片，≥2 个加载即替换
+   * 对于缩小（z → z-1）：4 个旧瓦片共享 1 个父瓦片，父加载后立即替换
+   */
+  private static readonly TRANSITION_TIMEOUT_MS = 5000;
+
+  private _evictStaleZoomLevels(layers: ILayer[], visibleKeys: Set<string>): void {
+    for (const layer of layers) {
+      const scheme = layer.tileScheme;
+      if (!(scheme instanceof XYZTileScheme)) continue;
+
+      const schemeId = scheme.schemeId;
+      const currentZoom = scheme.currentZoom;
+      if (currentZoom == null) continue;
+
+      const prevZoom = this._schemeZooms.get(schemeId);
+      this._schemeZooms.set(schemeId, currentZoom);
+
+      // zoom 未变化 → 无需淘汰
+      if (prevZoom == null || prevZoom === currentZoom) continue;
+
+      // zoom 发生变化 → 对旧级别瓦片做覆盖率检查后渐进移除
+      const zoomingIn = currentZoom > prevZoom;
+      const now = Date.now();
+
+      for (const [key, tile] of this._loadedTiles) {
+        if (tile.key.schemeId !== schemeId) continue;
+        if (tile.key.level !== prevZoom) continue;
+        // 当前可见集合中的瓦片不淘汰（可能是新级别的）
+        if (visibleKeys.has(key)) continue;
+
+        if (zoomingIn) {
+          // 放大：检查该旧瓦片的 4 个子瓦片是否已加载
+          const children = scheme.getChildKeys(tile.key);
+          let loadedCount = 0;
+          for (const child of children) {
+            if (this._loadedTiles.has(tileKeyToString(child))) loadedCount++;
+          }
+          // ≥2 个子瓦片已加载 → 旧瓦片可安全移除（至少覆盖一半面积）
+          if (loadedCount >= 2) {
+            this._loadedTiles.delete(key);
+            this._parentPlaceholders.delete(key);
+          } else if (now - (tile.lastAccessTime || now) > TileManager.TRANSITION_TIMEOUT_MS) {
+            // 超时强制移除（防止子瓦片加载失败导致旧瓦片永远残留）
+            this._loadedTiles.delete(key);
+            this._parentPlaceholders.delete(key);
+          }
+        } else {
+          // 缩小：检查新级别（更低 zoom）的对应父瓦片是否已加载
+          const newParent = scheme.getParentKey(tile.key);
+          if (newParent && this._loadedTiles.has(tileKeyToString(newParent))) {
+            this._loadedTiles.delete(key);
+            this._parentPlaceholders.delete(key);
+          } else if (now - (tile.lastAccessTime || now) > TileManager.TRANSITION_TIMEOUT_MS) {
+            this._loadedTiles.delete(key);
+            this._parentPlaceholders.delete(key);
+          }
+        }
+      }
+    }
+  }
+
+  /**
+   * 父瓦片 refined 退出机制
+   *
+   * 渐进式显示注入的父瓦片只是临时占位，当其子瓦片加载完成后应移除，
+   * 否则父瓦片会与子瓦片同时显示（底图混乱的另一个来源）。
+   */
+  private _evictRefinedParents(): void {
+    for (const parentStr of this._parentPlaceholders) {
+      const tile = this._loadedTiles.get(parentStr);
+      if (!tile) {
+        this._parentPlaceholders.delete(parentStr);
+        continue;
+      }
+
+      // 获取该父瓦片的 scheme（通过 layers 查找）
+      // 直接从 tile.key 解析子瓦片：z+1 级别的 4 个子瓦片
+      const parts = tile.key.id.split("/");
+      if (parts.length !== 3) continue;
+      const z = parseInt(parts[0], 10);
+      const x = parseInt(parts[1], 10);
+      const y = parseInt(parts[2], 10);
+
+      // 检查 4 个子瓦片是否已加载
+      let childrenLoaded = 0;
+      for (let dy = 0; dy < 2; dy++) {
+        for (let dx = 0; dx < 2; dx++) {
+          const childStr = `${tile.key.schemeId}:${z + 1}/${x * 2 + dx}/${y * 2 + dy}`;
+          if (this._loadedTiles.has(childStr)) childrenLoaded++;
+        }
+      }
+
+      // 所有 4 个子瓦片都已加载 → 父瓦片完成占位使命，移除
+      if (childrenLoaded >= 4) {
+        this._loadedTiles.delete(parentStr);
+        this._parentPlaceholders.delete(parentStr);
+      }
+    }
+  }
+
+  /**
+   * 新瓦片加载完成后的即时淘汰检查
+   *
+   * 与 _evictStaleZoomLevels 不同，这个方法不依赖 zoom 变化事件，
+   * 而是在每个新瓦片加载完成后立即检查其父瓦片是否可被淘汰。
+   * 这解决了"用户停止缩放后 extentChanged=false 但新瓦片仍在加载"的场景。
+   */
+  private _evictOldZoomTilesAfterLoad(loadedKey: TileKey): void {
+    // 检查加载的瓦片的父瓦片是否在 _loadedTiles 中
+    const parts = loadedKey.id.split("/");
+    if (parts.length !== 3) return;
+    const z = parseInt(parts[0], 10);
+    const x = parseInt(parts[1], 10);
+    const y = parseInt(parts[2], 10);
+    if (z <= 0) return;
+
+    // 父瓦片 key
+    const parentStr = `${loadedKey.schemeId}:${z - 1}/${Math.floor(x / 2)}/${Math.floor(y / 2)}`;
+    if (!this._loadedTiles.has(parentStr)) return;
+
+    // 检查父瓦片的 4 个子瓦片加载情况
+    const px = Math.floor(x / 2);
+    const py = Math.floor(y / 2);
+    let childrenLoaded = 0;
+    for (let dy = 0; dy < 2; dy++) {
+      for (let dx = 0; dx < 2; dx++) {
+        const childStr = `${loadedKey.schemeId}:${z}/${px * 2 + dx}/${py * 2 + dy}`;
+        if (this._loadedTiles.has(childStr)) childrenLoaded++;
+      }
+    }
+
+    // ≥2 个子瓦片已加载 → 父瓦片可安全移除
+    if (childrenLoaded >= 2) {
+      this._loadedTiles.delete(parentStr);
+      this._parentPlaceholders.delete(parentStr);
+    }
+  }
+
   /** 拓扑排序图层列表：无依赖的优先，依赖其他图层的在后 */
   private _sortByDeps(layers: ILayer[]): ILayer[] {
     const visited = new Set<string>();
@@ -306,6 +482,11 @@ export class TileManager {
     keyToLayerIds: Map<string, { key: TileKey; layerIds: Set<string>; bounds: CrsBounds }>,
   ): void {
     const strKey = tileKeyToString(key);
+
+    // 失败次数超限 → 跳过，避免无限重试持续 404 的瓦片
+    if ((this._failCounts.get(strKey) ?? 0) >= TileManager.MAX_FAIL_COUNT) {
+      return;
+    }
 
     // 已在加载中 → 追加 layerId
     if (this._loading.has(strKey)) {
@@ -371,18 +552,23 @@ export class TileManager {
     try {
       tile.state = "loading";
 
-      // 为每个 layer 加载内容
-      for (const layerId of req.layerIds) {
+      // 为每个 layer 并行加载内容（提升多图层共享瓦片的加载速度）
+      const loadPromises = req.layerIds.map(async (layerId) => {
         const layer = layers.find((l) => l.id === layerId);
-        if (!layer) continue;
+        if (!layer) return null;
 
         // 检查该 layer 是否已有 content（避免重复）
         const hasContent = tile.contents.some((c) => c.layerId === layerId);
-        if (hasContent) continue;
+        if (hasContent) return null;
 
         const content = await this._loadFn(tile, layer, controller.signal);
-        if (content) {
-          tile.contents.push(content);
+        return content;
+      });
+
+      const results = await Promise.allSettled(loadPromises);
+      for (const result of results) {
+        if (result.status === "fulfilled" && result.value) {
+          tile.contents.push(result.value);
         }
       }
 
@@ -393,6 +579,9 @@ export class TileManager {
           this.cache.set(cacheKey, tile, this._estimateBytes(tile));
         }
         this.scheduler.markLoaded(req.tileKey);
+        // 新瓦片加载完成 → 触发淘汰检查（可能满足覆盖率条件，可移除旧级别瓦片）
+        this._evictRefinedParents();
+        this._evictOldZoomTilesAfterLoad(req.tileKey);
       } else {
         tile.state = "failed";
         this.scheduler.markFailed(req.tileKey);
@@ -401,6 +590,8 @@ export class TileManager {
       if (err?.name === "AbortError") return;
       tile.state = "failed";
       tile.failCount++;
+      // 记录失败次数，超过上限后不再重试
+      this._failCounts.set(cacheKey, (this._failCounts.get(cacheKey) ?? 0) + 1);
       this.scheduler.markFailed(req.tileKey);
     } finally {
       this._loading.delete(cacheKey);
@@ -410,7 +601,27 @@ export class TileManager {
   private _estimateBytes(tile: Tile): number {
     let bytes = 1024; // Tile 元数据
     for (const content of tile.contents) {
-      bytes += content.renderObjects.length * 1024;
+      for (const ro of content.renderObjects) {
+        const obj = ro.object as any;
+        if (obj?.geometry) {
+          // 估算 geometry 占用：position + uv + index
+          const posAttr = obj.geometry.getAttribute?.("position");
+          if (posAttr) {
+            bytes += posAttr.array.byteLength;
+            const uvAttr = obj.geometry.getAttribute?.("uv");
+            if (uvAttr) bytes += uvAttr.array.byteLength;
+            const idx = obj.geometry.getIndex?.();
+            if (idx) bytes += idx.array.byteLength;
+          }
+        }
+        if (obj?.material?.map?.image) {
+          // 纹理估算：width * height * 4 bytes (RGBA)
+          const img = obj.material.map.image;
+          bytes += (img.width ?? 256) * (img.height ?? 256) * 4;
+        }
+      }
+      // 最低保底：每个 content 至少 4KB（覆盖小纹理场景）
+      bytes = Math.max(bytes, 4096);
     }
     return bytes;
   }

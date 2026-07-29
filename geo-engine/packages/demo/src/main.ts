@@ -170,7 +170,7 @@ async function main() {
   const app = document.getElementById("app")!;
 
   // ── Three.js setup ──────────────────────────────────────────
-  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  const renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
   renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
   renderer.setClearColor(0x1a1a2e);
   app.appendChild(renderer.domElement);
@@ -189,10 +189,10 @@ async function main() {
   const mapController = new PerspectiveMapController({
     center: { x: 12957000, y: 4860000 },
     distance: 50000,
-    maxPolarAngle: Math.PI / 2.4,
-    fov: 70,
-    near: 100,
-    far: 5e7,
+    maxPolarAngle: Math.PI / 2.2, // GIS 约束：不允许低于地平线
+    fov: 60,
+    near: 50,
+    far: 1e8,
   });
   const camera = mapController.camera;
   // 相机不加入场景图：始终在 CRS 坐标操作（OrbitControls 交互逻辑完全不受影响），
@@ -229,8 +229,10 @@ async function main() {
   //   （MapTiler/天地图需申请 token；XYZTileSource 支持 {z}/{x}/{y}/{-y} 模板）
   const osmRenderer = new RasterRenderer({
     name: "osm-renderer",
-    // 底图与引擎同为 EPSG:3857，无重投影变形，无需细分网格
-    quality: new SubdividedPlane(1),
+    // 底图与引擎同为 EPSG:3857，无重投影变形，但启用自适应细分以支持：
+    //   1. 用户切换到非 3857 CRS 时自动增加网格密度消除投影畸变
+    //   2. 低缩放级别时提供更精细的几何体避免渲染伪影
+    quality: new SubdividedPlane(2, true),
   });
 
   const osmLayer = new RasterLayer({
@@ -534,9 +536,29 @@ async function main() {
       (group as any).__fadeContent = tile.contents[0];
     }
 
-    // 移除淘汰的 tile（GPU 资源已由 Tile.dispose 释放，此处只从场景移除）
+    // 移除淘汰的 tile（释放 GPU 资源 + 从场景移除）
     for (const [key, group] of sceneTiles) {
       if (!loaded.has(key)) {
+        // 释放 geometry / material / texture（设计文档 §15）
+        group.traverse((child) => {
+          if (
+            child instanceof THREE.Mesh ||
+            child instanceof THREE.Line ||
+            child instanceof THREE.Points
+          ) {
+            child.geometry?.dispose();
+            const mat = child.material as THREE.Material | THREE.Material[];
+            if (Array.isArray(mat)) {
+              for (const m of mat) {
+                if ("map" in m && (m as any).map) (m as any).map.dispose();
+                m.dispose();
+              }
+            } else if (mat) {
+              if ("map" in mat && (mat as any).map) (mat as any).map.dispose();
+              mat.dispose();
+            }
+          }
+        });
         worldRoot.remove(group);
         sceneTiles.delete(key);
       }

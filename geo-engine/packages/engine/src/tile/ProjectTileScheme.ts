@@ -61,7 +61,8 @@ export class ProjectTileScheme implements ITileScheme {
     const TARGET_PIXELS = 256;
     const idealTileSize = resolution * TARGET_PIXELS;
     const level = Math.round(Math.log2(idealTileSize / this.baseTileSize));
-    return Math.max(0, level);
+    // 上下限保护：最低 0，最高 20（防止极端分辨率下 tileSize 指数爆炸）
+    return Math.max(0, Math.min(20, level));
   }
 
   getTileBounds(key: TileKey): CrsBounds {

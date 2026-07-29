@@ -17,8 +17,9 @@ export interface ILayerRenderer<TData = unknown> {
    * 从原始数据创建 TileContent（含 RenderObject[]）
    * @param data — DataSource.fetch() 返回的原始数据
    * @param tile — 目标 Tile（提供 bounds, origin 等信息）
+   * @param layerId — 可选，关联的 Layer ID（用于 TileContent.layerId 精确匹配）
    */
-  createContent(data: TData, tile: Tile): Promise<TileContent>;
+  createContent(data: TData, tile: Tile, layerId?: string): Promise<TileContent>;
 
   /**
    * 更新已有 TileContent（数据刷新时使用）

@@ -36,11 +36,11 @@ export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
     this.quality = options.quality ?? new SimplePlane();
   }
 
-  async createContent(data: ImageBitmap, tile: Tile): Promise<TileContent> {
+  async createContent(data: ImageBitmap, tile: Tile, layerId?: string): Promise<TileContent> {
     const content = new TileContent(
       `raster-${tile.key.id}`,
       tile.key,
-      "raster-layer",
+      layerId ?? "raster-layer",
     );
 
     // 1. 从 ImageBitmap 创建 Three.js 纹理
@@ -62,9 +62,14 @@ export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
     );
 
     // 3. 创建材质
+    // polygonOffset 防止多图层叠加时 z-fighting：
+    // 底图 factor=1 稍向后推，叠加层默认 factor=0 在前。
     const material = new THREE.MeshBasicMaterial({
       map: texture,
       side: THREE.DoubleSide,
+      polygonOffset: true,
+      polygonOffsetFactor: 1,
+      polygonOffsetUnits: 1,
     });
 
     // 4. 创建 Mesh

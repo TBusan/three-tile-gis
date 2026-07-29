@@ -17,6 +17,8 @@ export interface LoadRequest {
   screenArea: number;
   /** 是否在视锥内 */
   inFrustum: boolean;
+  /** 父瓦片字符串 key（用于 parentReady 权重判断） */
+  parentKey?: string;
 }
 
 /**
@@ -43,8 +45,10 @@ const DEFAULT_WEIGHTS: ScheduleWeights = {
  * 每帧最多加载 MAX_PER_FRAME 个 tile。
  */
 export class TileScheduler {
-  /** 每帧最大加载数 */
-  maxPerFrame = 2;
+  /** 每帧基础加载数（正常浏览时） */
+  maxPerFrame = 4;
+  /** 队列积压时的加速上限（缩小时快速填充） */
+  burstPerFrame = 8;
   /** 优先级权重 */
   weights: ScheduleWeights = { ...DEFAULT_WEIGHTS };
 
@@ -123,11 +127,16 @@ export class TileScheduler {
   }
 
   /**
-   * 取下一帧应加载的 Tile 列表（受 maxPerFrame 限制）
+   * 取下一帧应加载的 Tile 列表（受帧预算限制）
+   *
+   * 动态帧预算：队列积压较多时加速加载（burst），
+   * 避免缩小后长时间看到空白/低分辨率瓦片。
    */
   takeNext(): LoadRequest[] {
+    // 动态调整：队列超过 8 个时用 burst 模式加速
+    const budget = this._queue.length > 8 ? this.burstPerFrame : this.maxPerFrame;
     const batch: LoadRequest[] = [];
-    while (batch.length < this.maxPerFrame && this._queue.length > 0) {
+    while (batch.length < budget && this._queue.length > 0) {
       const req = this._queue.shift()!;
       const key = tileKeyToString(req.tileKey);
       if (this._loading.has(key)) continue;
@@ -158,9 +167,10 @@ export class TileScheduler {
     const w1 = weights.screenArea * req.screenArea;
     const w2 = weights.distance * (1 / Math.max(req.distanceToCamera, 1));
     const w3 = weights.inFrustum * (req.inFrustum ? 1 : 0.1);
+    // parentReady：父瓦片已加载 → 当前瓦片可渐进细化，优先级提升
     const w4 =
       weights.parentReady *
-      (this._loadedParents.has(tileKeyToString(req.tileKey))
+      (req.parentKey && this._loadedParents.has(req.parentKey)
         ? 1
         : 0);
 
