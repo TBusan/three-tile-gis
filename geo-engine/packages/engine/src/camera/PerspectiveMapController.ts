@@ -71,16 +71,21 @@ export class PerspectiveMapController implements ICameraController {
     this.controls.dampingFactor = 0.08;
     this.controls.maxPolarAngle = maxPolarAngle;
     this.controls.minPolarAngle = 0; // 允许完全俯视
-    // 鼠标映射：LEFT = PAN, RIGHT = ROTATE, MIDDLE = DOLLY
+    // 鼠标映射：遵循 GIS 引擎惯例（Google Maps / CesiumJS / Mapbox）
+    //   LEFT = ROTATE（旋转/倾斜）
+    //   RIGHT = PAN（平移）
+    //   MIDDLE = DOLLY（缩放）
     this.controls.mouseButtons = {
-      LEFT: THREE.MOUSE.PAN,
+      LEFT: THREE.MOUSE.ROTATE,
       MIDDLE: THREE.MOUSE.DOLLY,
-      RIGHT: THREE.MOUSE.ROTATE,
+      RIGHT: THREE.MOUSE.PAN,
     };
+    // 平移沿地平面进行（而非屏幕空间），避免倾斜时 Z 分量漂移
+    this.controls.screenSpacePanning = false;
     this.controls.minDistance = 100;
     this.controls.maxDistance = 5e7;
     this.controls.panSpeed = 1.0;
-    this.controls.rotateSpeed = 0.5;
+    this.controls.rotateSpeed = 1.0;
     this.controls.zoomSpeed = 1.2;
   }
 
@@ -100,29 +105,45 @@ export class PerspectiveMapController implements ICameraController {
   /**
    * CRS 空间视野范围。
    *
-   * 从相机 FOV + target 距离推算地面（z=0）覆盖范围的矩形近似，
-   * 再用 MAX_EXTENT_HALF 硬钳位防止 extent 在远距离时无限膨胀。
+   * 考虑相机倾斜角的视野范围计算：
+   *   - 垂直俯视时：简单矩形近似
+   *   - 倾斜时：远端地面覆盖远大于近端，需扩展 extent
    *
-   * 注：这是简化近似（假定垂直俯视），在 pitch 较大时 extent 会偏高估，
-   * 但 MAX_EXTENT_HALF 钳位保证了不会爆炸。更精确的射线-地面交线方法
-   * 在复杂 camera 矩阵状态（如 render() 中的临时相机偏移）下可能引入
-   * Three.js matrixWorld 更新开销，留待后续优化。
+   * 倾斜补偿原理：
+   *   polar angle θ 越大（越接近地平线），视野远端地面距离越大。
+   *   使用 1/cos(θ) 近似扩展因子，确保远端瓦片被包含在调度范围内。
    */
   get extent(): [number, number, number, number] {
     const target = this.controls.target;
-    const dist = this.camera.position.distanceTo(target);
+    const camPos = this.camera.position;
+    const dist = camPos.distanceTo(target);
     const vFov = THREE.MathUtils.degToRad(this.camera.fov);
+
+    // 计算 polar angle（相机与垂直方向的夹角）
+    const heightDiff = Math.abs(camPos.z - target.z);
+    const polarAngle = Math.acos(Math.min(1, heightDiff / Math.max(dist, 1)));
+
+    // 基础半尺寸（垂直俯视时的近似）
     const halfH = Math.tan(vFov / 2) * dist;
     const aspect = this.camera.aspect;
     const halfW = halfH * aspect;
 
+    // 倾斜补偿：当 polar angle > 0 时，远端地面覆盖增大
+    // 使用保守的扩展因子，确保远端瓦片不被遗漏
+    // cos(polarAngle) 在 0° 时为 1（无扩展），在 80° 时约 0.17（扩展约 6 倍）
+    const cosPolar = Math.cos(polarAngle);
+    const tiltFactor = cosPolar > 0.1 ? 1 / cosPolar : 10; // 钳位防止极端值
+    // 对宽度和高度都应用扩展（倾斜时两侧也变宽）
+    const expandedHalfW = halfW * Math.min(tiltFactor, 4);
+    const expandedHalfH = halfH * Math.min(tiltFactor, 4);
+
     // 硬钳位：防止单次 extent 超过半个地球周长
     const MAX = PerspectiveMapController.MAX_EXTENT_HALF;
     return [
-      Math.max(target.x - MAX, target.x - halfW),
-      Math.max(target.y - MAX, target.y - halfH),
-      Math.min(target.x + MAX, target.x + halfW),
-      Math.min(target.y + MAX, target.y + halfH),
+      Math.max(target.x - MAX, target.x - expandedHalfW),
+      Math.max(target.y - MAX, target.y - expandedHalfH),
+      Math.min(target.x + MAX, target.x + expandedHalfW),
+      Math.min(target.y + MAX, target.y + expandedHalfH),
     ];
   }
 
@@ -165,24 +186,27 @@ export class PerspectiveMapController implements ICameraController {
     // 动态 polar angle：高空限制俯视，低空允许倾斜
     // GIS 引擎设计约束：
     //   1. 相机永远不能低于地平线（maxPolarAngle ≤ π/2）
-    //   2. 高海拔时逐步限制为俯视，但保留最小可操作角度
-    //   3. 低海拔时允许较大倾斜（但不超过用户配置上限）
+    //   2. 正常浏览距离（<500km）允许完全自由倾斜
+    //   3. 仅在极远距离（全球视图）才逐步限制为俯视
     const dist = this.camera.position.distanceTo(this.controls.target);
 
-    // 动态上限：距离越远 → 越限制为俯视
-    // 使用 sqrt 而非 pow(2) 使过渡更平滑：
-    //   dist=5000 → 允许约 81°（近地面，自由倾斜）
-    //   dist=50000 → 允许约 72°
-    //   dist=5e6 → 允许约 45°
-    //   dist=5e7 → 允许约 14°（全球视图，近俯视）
-    const rawMax = this._userMaxPolar * Math.min(1, Math.sqrt(1e6 / Math.max(dist, 100)));
-    // 钳位到 [_minPolarAngle, _userMaxPolar]，保证：
-    //   - 不低于最小可操作角度（防止锁死）
-    //   - 不超过用户配置上限（GIS 不允许低于地平线）
+    // 动态上限：使用线性衰减，仅在极远距离才限制倾斜
+    //   dist ≤ 500,000 (500km) → 允许完全自由倾斜（用户配置上限）
+    //   dist = 5,000,000 (5000km) → 约 60% 的用户上限
+    //   dist = 50,000,000 (全球) → 约 18% 的用户上限（近俯视）
+    const freeRange = 5e5; // 500km 内完全自由
+    const ratio = dist <= freeRange ? 1 : freeRange / dist;
+    const rawMax = this._userMaxPolar * ratio;
+    // 钳位到 [_minPolarAngle, _userMaxPolar]
     const dynamicMax = Math.max(this._minPolarAngle, Math.min(rawMax, this._userMaxPolar));
     this.controls.maxPolarAngle = dynamicMax;
 
     this.controls.update();
+
+    // GIS 约束：锁定 target 在地面平面（z=0）
+    // OrbitControls 的 screenSpacePanning 在相机倾斜时会让 target.z 漂移，
+    // 导致向上平移方向异常（表现为“不能向上翻转”）。
+    this.controls.target.z = 0;
   }
 
   dispose(): void {

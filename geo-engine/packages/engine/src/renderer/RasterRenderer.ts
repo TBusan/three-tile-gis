@@ -94,11 +94,16 @@ export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
   }
 
   disposeContent(content: TileContent): void {
-    // 释放纹理（在 RenderObject dispose 之前）
-    const tex = (
-      (content.renderObjects[0]?.object as THREE.Mesh)
-        ?.material as THREE.MeshBasicMaterial
-    )?.map;
-    if (tex) tex.dispose();
+    // 释放所有 renderObject 的纹理（在 RenderObject dispose 之前）
+    for (const ro of content.renderObjects) {
+      const mesh = ro.object as THREE.Mesh;
+      if (!mesh?.material) continue;
+      const materials = Array.isArray(mesh.material) ? mesh.material : [mesh.material];
+      for (const mat of materials) {
+        if ("map" in mat && (mat as THREE.MeshBasicMaterial).map) {
+          (mat as THREE.MeshBasicMaterial).map!.dispose();
+        }
+      }
+    }
   }
 }

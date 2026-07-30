@@ -36,8 +36,22 @@
       user-select: none;
     }
     #panel span { color: #7ecfff; }
+    #panel button {
+      pointer-events: auto;
+      cursor: pointer;
+      background: #2a3f5f;
+      color: #e0e0e0;
+      border: 1px solid #555;
+      border-radius: 4px;
+      padding: 2px 8px;
+      font-size: 11px;
+      margin-left: 6px;
+    }
+    #panel button:hover { background: #3a5f7f; }
+    #panel button.off { background: #555; color: #999; }
   </style>
-  <script type="module" crossorigin src="/assets/index-DZlRLMyT.js"></script>
+  <script type="module" crossorigin src="/assets/main-B64HtcSy.js"></script>
+  <link rel="modulepreload" crossorigin href="/assets/PerspectiveMapController-CEQ8Z6Cz.js">
 </head>
 <body>
   <div id="app">
@@ -64,6 +78,10 @@
       <div style="color:#7ecfff;font-size:11px">CODE_OF_CONDUCT.md</div>
       <hr style="border-color:#444;margin:6px 0" />
       <div>Scheduler: <span id="scheduler-stats">—</span></div>
+      <hr style="border-color:#444;margin:6px 0" />
+      <div style="pointer-events:auto">
+        <button id="btn-checker">棋盘格: ON</button>
+      </div>
     </div>
   </div>
 </body>

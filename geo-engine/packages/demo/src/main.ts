@@ -96,11 +96,12 @@ class CheckerboardRenderer implements ILayerRenderer<CheckerTileData> {
   async createContent(
     data: CheckerTileData,
     tile: Tile,
+    layerId?: string,
   ): Promise<TileContent> {
     const content = new TileContent(
       `cb-${tile.key.id}`,
       tile.key,
-      "cb-layer",
+      layerId ?? "cb-layer",
     );
 
     const [xmin, ymin, xmax, ymax] = tile.bounds;
@@ -447,7 +448,7 @@ async function main() {
     // 空数据（如矢量瓦片裁剪后无要素）跳过内容创建，避免空 TileContent 被计数。
     // 仅对数组型数据（GeoFeature[]）生效；栅格/棋盘格返回对象不受影响。
     if (Array.isArray(data) && data.length === 0) return null;
-    return renderer.createContent(data, tile);
+    return renderer.createContent(data, tile, layer.id);
   };
 
   // ── Engine ─────────────────────────────────────────────────
@@ -468,6 +469,21 @@ async function main() {
   });
 
   engine.start();
+
+  // ── 图层显隐控制 ────────────────────────────────────────
+  const layerVisibility = new Map<string, boolean>([
+    [checkerLayer.id, true],
+  ]);
+
+  const btnChecker = document.getElementById("btn-checker")!;
+  btnChecker.addEventListener("click", () => {
+    const cur = layerVisibility.get(checkerLayer.id) ?? true;
+    const next = !cur;
+    layerVisibility.set(checkerLayer.id, next);
+    checkerLayer.visible = next;
+    btnChecker.textContent = `棋盘格: ${next ? "ON" : "OFF"}`;
+    btnChecker.classList.toggle("off", !next);
+  });
 
   // ── Scene sync ─────────────────────────────────────────────
   // 跟踪已添加到场景的 tile group
@@ -525,6 +541,9 @@ async function main() {
 
       worldRoot.add(group);
       sceneTiles.set(key, group);
+
+      // 存储该 group 包含的 layerId 列表（用于图层显隐控制）
+      (group as any).__layerIds = tile.contents.map((c) => c.layerId);
 
       // 淡入动画起点：记录每个材质的目标透明度，然后置 0
       forEachMaterial(group, (mat) => {
@@ -597,6 +616,14 @@ async function main() {
 
     // Sync tile meshes（worldRoot.position = -origin）
     syncScene();
+
+    // 图层显隐控制：根据 layerVisibility 设置每个 group 的 visible
+    for (const [, group] of sceneTiles) {
+      const layerIds: string[] | undefined = (group as any).__layerIds;
+      if (!layerIds) continue;
+      // 只要 group 中有一个 layer 是可见的，就显示该 group
+      group.visible = layerIds.some((lid) => layerVisibility.get(lid) !== false);
+    }
 
     // 渲染瞬间将相机临时偏移到局部坐标（相机平时在 CRS 坐标，OrbitControls 不受影响）。
     // 相机与 worldRoot 子节点（瓦片/准星）同处局部坐标系，相对视图正确；

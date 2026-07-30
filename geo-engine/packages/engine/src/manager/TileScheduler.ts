@@ -56,6 +56,8 @@ export class TileScheduler {
   private readonly _loading = new Map<string, AbortController>();
   /** 已加载的 parent tile key 集合（用于 parentReady 权重） */
   private readonly _loadedParents = new Set<string>();
+  /** _loadedParents 容量上限 — 超过后清空重建（仅影响优先级权重精度） */
+  private static readonly LOADED_PARENTS_MAX = 4096;
 
   /** 当前排队中的请求（每帧 reset） */
   private _queue: LoadRequest[] = [];
@@ -64,6 +66,10 @@ export class TileScheduler {
   markLoaded(tileKey: TileKey): void {
     const key = tileKeyToString(tileKey);
     this._loading.delete(key);
+    // 容量保护：超过上限时清空重建，防止长时间浏览导致无限增长
+    if (this._loadedParents.size >= TileScheduler.LOADED_PARENTS_MAX) {
+      this._loadedParents.clear();
+    }
     this._loadedParents.add(key);
   }
 
