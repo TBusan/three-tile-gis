@@ -962,4 +962,149 @@ describe("TileManager", () => {
     );
     expect(mgr.isTileHidden(c1Tile)).toBe(false);
   });
+
+  it("_nullLayers 容量上限：超限时清空重建，不无界增长", async () => {
+    let gate: () => void = () => {};
+    const mgr = new TileManager(cache, origin, async () => {
+      await new Promise<void>((r) => (gate = r));
+      return null; // 确定性空
+    });
+    const anyMgr = mgr as unknown as { _nullLayers: Map<string, Set<string>> };
+    const MAX = (TileManager as unknown as {
+      NULL_LAYERS_MAX: number;
+    }).NULL_LAYERS_MAX;
+
+    // 预灌满到容量上限（模拟长时间平移积累的确认空记录）
+    for (let i = 0; i < MAX; i++) {
+      anyMgr._nullLayers.set(`proj:seed@${i}`, new Set(["L1"]));
+    }
+    expect(anyMgr._nullLayers.size).toBe(MAX);
+
+    // 新的空瓦片确认 → 超限 → 清空重建
+    const key = makeTileKey("proj", "0-0", 0);
+    const layer = makeMockLayer("L1", "proj", [key]);
+    mgr.update([-1000, -1000, 1000, 1000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    await vi.waitFor(() => expect(mgr.scheduler.loadingCount).toBe(1), {
+      timeout: 1000,
+    });
+    gate();
+    await vi.waitFor(() => expect(mgr.scheduler.loadingCount).toBe(0), {
+      timeout: 1000,
+    });
+
+    // 清空后只剩刚确认的这一条（有界，不会继续无限增长）
+    expect(anyMgr._nullLayers.size).toBe(1);
+    expect(anyMgr._nullLayers.get("proj:0-0@0")?.has("L1")).toBe(true);
+  });
+
+  it("共享瓦片守卫：迟到 content 不携带已 dispose 的旧 content 回插", async () => {
+    let lastLoadedLayer = "";
+    const mgr = new TileManager(cache, origin, async (tile, layer) => {
+      lastLoadedLayer = layer.id;
+      const tc = new TileContent(`tc-${layer.id}`, tile.key, layer.id);
+      tc.state = "ready";
+      return tc;
+    });
+
+    const key = makeTileKey("proj", "0-0", 0);
+    const keyStr = tileKeyToString(key);
+    const layerA = makeMockLayer("A", "proj", [key]);
+    const layerB = makeMockLayer("B", "proj", [key]);
+
+    // ① A 层 content 已加载到共享瓦片
+    await mgr.loadTileNow(key, layerA);
+    const tile = mgr.loadedTiles.get(keyStr)!;
+    expect(tile.contents.some((c) => c.layerId === "A")).toBe(true);
+
+    // ② 模拟 cache.trim 淘汰：瓦片旧 content 被 dispose
+    tile.contents[0].dispose();
+    expect(tile.contents[0].disposed).toBe(true);
+
+    // ③ B 层迟到 content 加载完成
+    mgr.update([-1000, -1000, 1000, 1000], { x: 0, y: 0, z: 0 }, mockCRS, [layerB]);
+    await vi.waitFor(() => expect(lastLoadedLayer).toBe("B"), { timeout: 1000 });
+    await vi.waitFor(
+      () => {
+        const t = mgr.loadedTiles.get(keyStr)!;
+        expect(t.contents.some((c) => c.layerId === "B")).toBe(true);
+      },
+      { timeout: 1000 },
+    );
+
+    // 守卫生效：已 dispose 的 A content 被过滤，不再回插到 loadedTiles
+    const after = mgr.loadedTiles.get(keyStr)!;
+    expect(after.contents.some((c) => c.disposed)).toBe(false);
+    expect(after.contents.some((c) => c.layerId === "A")).toBe(false);
+    expect(after.contents.some((c) => c.layerId === "B")).toBe(true);
+  });
+
+  it("resetScheme：只清除指定 scheme 的瓦片，保留其它 scheme", async () => {
+    const mgr = new TileManager(cache, origin, async (tile, layer) => {
+      const tc = new TileContent(
+        `tc-${layer.id}-${tile.key.id}`,
+        tile.key,
+        layer.id,
+      );
+      tc.state = "ready";
+      return tc;
+    });
+
+    const xyzKey = makeTileKey("xyz", "0-0", 0);
+    const projKey = makeTileKey("proj", "0-0", 0);
+    const xyzLayer = makeMockLayer("Lxyz", "xyz", [xyzKey]);
+    const projLayer = makeMockLayer("Lproj", "proj", [projKey]);
+
+    mgr.update(
+      [-1000, -1000, 1000, 1000],
+      { x: 0, y: 0, z: 0 },
+      mockCRS,
+      [xyzLayer, projLayer],
+    );
+    await vi.waitFor(() => expect(mgr.loadedTiles.size).toBe(2), {
+      timeout: 1000,
+    });
+
+    mgr.resetScheme("xyz");
+
+    // 其它 scheme 的瓦片保留，xyz 全部清除（loaded + cache）
+    expect(mgr.loadedTiles.has("proj:0-0")).toBe(true);
+    expect(mgr.loadedTiles.has("xyz:0-0")).toBe(false);
+    expect(cache.has("proj:0-0")).toBe(true);
+    expect(cache.has("xyz:0-0")).toBe(false);
+  });
+
+  it("resetScheme：abort 在途加载 + 代际守卫丢弃 reset 之后完成的旧代结果", async () => {
+    const signals: AbortSignal[] = [];
+    let resolveLoad: (tc: TileContent | null) => void = () => {};
+    const mgr = new TileManager(cache, origin, (tile, layer, signal) => {
+      signals.push(signal);
+      // 数据源忽略 signal：不监听 abort，挂起直到测试手动放行
+      return new Promise<TileContent | null>((resolve) => {
+        resolveLoad = resolve;
+      });
+    });
+
+    const key = makeTileKey("xyz", "0-0", 0);
+    const layer = makeMockLayer("Lxyz", "xyz", [key]);
+
+    // 触发加载（挂起）
+    mgr.update([-1000, -1000, 1000, 1000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    await vi.waitFor(() => expect(mgr.scheduler.loadingCount).toBe(1), {
+      timeout: 1000,
+    });
+
+    // 底图切换 → resetScheme：在途加载被 abort、状态清除
+    mgr.resetScheme("xyz");
+    expect(signals[0].aborted).toBe(true);
+    expect(mgr.scheduler.loadingCount).toBe(0);
+    expect(mgr.loadedTiles.size).toBe(0);
+    expect(cache.count).toBe(0);
+
+    // 旧代加载此时才完成（数据源忽略 signal）→ 代际守卫丢弃，不重新回插
+    resolveLoad(new TileContent("stale", key, "Lxyz"));
+    await new Promise((r) => setTimeout(r, 50));
+
+    expect(mgr.loadedTiles.size).toBe(0);
+    expect(cache.count).toBe(0);
+  });
 });

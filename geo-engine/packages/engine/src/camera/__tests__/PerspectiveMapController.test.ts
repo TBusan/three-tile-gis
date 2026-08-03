@@ -11,13 +11,13 @@ describe("PerspectiveMapController", () => {
     expect(ctrl.camera.up.z).toBe(1);
   });
 
-  it("初始位置符合指定俯仰角（默认 45°）+ 默认方位 π（正南）", () => {
+  it("初始位置符合指定俯仰角（默认 45°）+ 默认方位 -π/2（正南）", () => {
     const ctrl = new PerspectiveMapController({
       center: { x: 0, y: 0 },
       distance: 1000,
     });
     const phi = Math.PI / 4;
-    // 方位角默认 π：cos(π)=-1 → 相机在正南 -Y（屏幕上方 = 北）
+    // 方位角默认 -π/2：cos(-π/2)=0（x=0）、sin(-π/2)=-1 → 相机在正南 -Y（屏幕上方 = 北）
     expect(ctrl.camera.position.x).toBeCloseTo(0, 6);
     expect(ctrl.camera.position.y).toBeCloseTo(-1000 * Math.sin(phi), 6);
     expect(ctrl.camera.position.z).toBeCloseTo(1000 * Math.cos(phi), 6);
@@ -96,5 +96,41 @@ describe("PerspectiveMapController", () => {
     expect(extent[2]).toBeGreaterThan(extent[0]);
     expect(extent[3]).toBeGreaterThan(extent[1]);
     expect(ctrl.resolution).toBeGreaterThan(0);
+  });
+
+  it("extent 在 45°/6km 时应覆盖远端地面（目标北侧 >10km）", () => {
+    const ctrl = new PerspectiveMapController({
+      center: { x: 0, y: 0 },
+      distance: 6000,
+      fov: 60,
+    });
+    ctrl.update(0);
+
+    const extent = ctrl.extent;
+    // 45° 倾斜下可见地面远端 ≈ 目标北侧 11.6km；旧的对称补偿只覆盖到 ~4.9km → 顶部灰带
+    expect(extent[3]).toBeGreaterThan(10000);
+    // 近端不再过度覆盖（可见近端 ≈ 3.1km；旧实现到 -4.9km）
+    expect(extent[1]).toBeGreaterThan(-3500);
+  });
+
+  it("近正俯视时 extent 接近无倾斜矩形", () => {
+    const ctrl = new PerspectiveMapController({
+      distance: 6000,
+      fov: 60,
+      initialPolarAngle: 0.01, // 会被 update() 钳位到 minPolarAngle(0.15)
+    });
+    ctrl.update(0);
+
+    const extent = ctrl.extent;
+    for (const v of extent) expect(Number.isFinite(v)).toBe(true);
+    expect(extent[2]).toBeGreaterThan(extent[0]);
+    expect(extent[3]).toBeGreaterThan(extent[1]);
+    // 近俯视下南北半高约为 tan(30°)*dist = 3464m（对称矩形，无远端放大）
+    expect(extent[3] - extent[1]).toBeLessThan(2 * 3464 * 1.05);
+  });
+
+  it("minPolarAngle 选项应应用到 controls（默认 0.15）", () => {
+    const ctrl = new PerspectiveMapController();
+    expect(ctrl.controls.minPolarAngle).toBeCloseTo(0.15, 6);
   });
 });

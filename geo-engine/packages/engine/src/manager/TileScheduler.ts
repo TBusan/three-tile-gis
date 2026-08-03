@@ -110,6 +110,25 @@ export class TileScheduler {
   }
 
   /**
+   * 取消并清除某一 scheme（前缀）的全部在途加载与排队请求。
+   * 底图/坐标系切换时调用：key 以 prefix（如 "xyz:"）开头的加载被 abort、
+   * 队列条目被过滤，其余 scheme 不受影响。
+   */
+  abortScheme(prefix: string): void {
+    for (const [key, controller] of this._loading) {
+      if (key.startsWith(prefix)) {
+        controller.abort();
+        this._loading.delete(key);
+      }
+    }
+    if (this._queue.length > 0) {
+      this._queue = this._queue.filter(
+        (req) => !tileKeyToString(req.tileKey).startsWith(prefix),
+      );
+    }
+  }
+
+  /**
    * 提交一批候选 Tile 到调度队列
    * @returns 排序后的请求列表（按优先级降序）
    */
@@ -125,11 +144,18 @@ export class TileScheduler {
       unique.push(req);
     }
 
-    // 按优先级排序（降序）
-    unique.sort((a, b) => this._computePriority(b) - this._computePriority(a));
+    // 按优先级排序（降序）：预计算每项优先级，避免在比较器内重复计算
+    // （每次比较都要对两个元素各算一遍，O(n log n) 次 _computePriority 调用）。
+    // 排序稳定性无关紧要 —— 同级请求顺序对加载无影响。
+    const prioritized = unique.map((req) => ({
+      req,
+      p: this._computePriority(req),
+    }));
+    prioritized.sort((a, b) => b.p - a.p);
+    const result = prioritized.map((e) => e.req);
 
-    this._queue = unique;
-    return unique;
+    this._queue = result;
+    return result;
   }
 
   /**
@@ -159,20 +185,6 @@ export class TileScheduler {
 
   get queueLength(): number {
     return this._queue.length;
-  }
-
-  /**
-   * 判断指定 key 是否仍在队列中等待加载（已排队但尚未被 takeNext 取走）。
-   *
-   * 供 TileManager 判断占位父瓦片的子瓦片是否「未 settle」：一个子瓦片只要
-   * 还在队列中（pending）或已开始加载（_loading），就不能把父占位转背景，
-   * 否则会在子瓦片真正开始加载前过早出现空洞。
-   */
-  hasPending(strKey: string): boolean {
-    for (const req of this._queue) {
-      if (tileKeyToString(req.tileKey) === strKey) return true;
-    }
-    return false;
   }
 
   get loadingCount(): number {

@@ -3,7 +3,6 @@
 import { describe, it, expect } from "vitest";
 import * as THREE from "three";
 import { SimplePlane } from "../SimplePlane";
-import { WebMercatorCRS } from "../../../crs/WebMercator";
 import { CGCS2000GKCRS } from "../../../crs/CGCS2000GK";
 import { XYZTileScheme } from "../../../tile/XYZTileScheme";
 import { makeTileKey } from "../../../tile/TileKey";
@@ -24,11 +23,14 @@ describe("SimplePlane", () => {
   });
 
   it("should use reprojected corners (not AABB) when a reprojector is provided", () => {
-    const wm = new WebMercatorCRS();
-    const scheme = new XYZTileScheme(wm as any, 0, 18);
-    // 北京附近的 z=12 瓦片
-    const key = makeTileKey("xyz", "12/356/170", 12);
+    // 非恒等目标 CRS（GK38）：getReprojector 返回逐顶点重投影函数。
+    // 3857 目标下 XYZTileScheme 恒等短路返回 null（几何走共享路径，见 XYZTileScheme.test）。
+    const gk = new CGCS2000GKCRS(38);
+    const scheme = new XYZTileScheme(gk as any, 0, 18);
+    // 114°E 中央子午线附近的 z=12 瓦片（GK38 变形最小）
+    const key = makeTileKey("xyz", "12/3345/1622", 12);
     const r = scheme.getReprojector(key)!;
+    expect(typeof r).toBe("function");
     const bounds = scheme.getTileBounds(key);
     // 贴近瓦片的局部原点（引擎 _snapOrigin 的实际做法），保证 float32 精度
     const origin = { x: bounds[0], y: bounds[1], z: 0 };
@@ -39,7 +41,7 @@ describe("SimplePlane", () => {
     expect(pos.count).toBe(4);
 
     // 每个顶点都必须等于 reprojector 在对应角点的精确输出，
-    // 而不是 AABB 角点（3857 下 AABB 与角点重合，误差为零）。
+    // 而不是 AABB 角点（非线性 GK 投影下 AABB 会侵入相邻瓦片区域）。
     const expected = [
       r(0, 0),
       r(1, 0),
@@ -47,12 +49,13 @@ describe("SimplePlane", () => {
       r(0, 1),
     ];
     for (let i = 0; i < 4; i++) {
-      expect(pos.getX(i)).toBeCloseTo(expected[i].x - origin.x, 3);
-      expect(pos.getY(i)).toBeCloseTo(expected[i].y - origin.y, 3);
+      // 局部坐标经 float32 存储，容差 0.005m（足以区分 reprojector 输出 vs AABB）
+      expect(pos.getX(i)).toBeCloseTo(expected[i].x - origin.x, 2);
+      expect(pos.getY(i)).toBeCloseTo(expected[i].y - origin.y, 2);
       expect(pos.getZ(i)).toBe(0);
     }
 
-    // 4 个角点必须恰好覆盖瓦片足迹的凸包（z=12 的 3857 瓦片约 4.9km 见方）
+    // 4 个角点必须恰好覆盖瓦片足迹的凸包（z=12 瓦片投影到 GK38 后约 8km×8km）
     const xs = [pos.getX(0), pos.getX(1), pos.getX(2), pos.getX(3)];
     const ys = [pos.getY(0), pos.getY(1), pos.getY(2), pos.getY(3)];
     expect(Math.max(...xs) - Math.min(...xs)).toBeGreaterThan(4000);
@@ -140,9 +143,11 @@ describe("SimplePlane", () => {
   });
 
   it("reprojector path should ignore bleed (still 4 vertices, UV in [0,1])", () => {
-    const wm = new WebMercatorCRS();
-    const scheme = new XYZTileScheme(wm as any, 0, 18);
-    const key = makeTileKey("xyz", "12/356/170", 12);
+    // 非恒等目标 CRS（GK38）：走 SimplePlane 的 reprojector 单四边形路径，
+    // 出血被忽略（UV 钳制在 [0,1]），与矩形路径的 [-b,1+b] 外延不同。
+    const gk = new CGCS2000GKCRS(38);
+    const scheme = new XYZTileScheme(gk as any, 0, 18);
+    const key = makeTileKey("xyz", "12/3345/1622", 12);
     const r = scheme.getReprojector(key)!;
     const bounds = scheme.getTileBounds(key);
     const origin = { x: bounds[0], y: bounds[1], z: 0 };

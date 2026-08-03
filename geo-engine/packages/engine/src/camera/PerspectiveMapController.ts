@@ -99,7 +99,9 @@ export class PerspectiveMapController implements ICameraController {
     this.controls.enableDamping = true;
     this.controls.dampingFactor = 0.08;
     this.controls.maxPolarAngle = maxPolarAngle;
-    this.controls.minPolarAngle = 0; // 允许完全俯视
+    // 应用用户配置的最小俯仰角（默认 0.15 ≈ 8.6°）：完全正俯视（polar≈0）下
+    // OrbitControls 的 makeSafe() 会让方位角退化 → 视图抖动；也防止高海拔时旋转锁死。
+    this.controls.minPolarAngle = minPolarAngle;
     // 鼠标映射：遵循 GIS 引擎惯例（Google Maps / CesiumJS / Mapbox）
     //   LEFT = ROTATE（旋转/倾斜）
     //   RIGHT = PAN（平移）
@@ -134,45 +136,77 @@ export class PerspectiveMapController implements ICameraController {
   /**
    * CRS 空间视野范围。
    *
-   * 考虑相机倾斜角的视野范围计算：
-   *   - 垂直俯视时：简单矩形近似
-   *   - 倾斜时：远端地面覆盖远大于近端，需扩展 extent
-   *
-   * 倾斜补偿原理：
-   *   polar angle θ 越大（越接近地平线），视野远端地面距离越大。
-   *   使用 1/cos(θ) 近似扩展因子，确保远端瓦片被包含在调度范围内。
+   * 按「屏幕四角视线与地面(z=0)的交点」取 AABB（标准 footprint 算法）。
+   * 倾斜时远端地面覆盖远大于近端（45°/6km 时远端到 ~11.6km、近端仅 ~3.1km），
+   * 旧的对称扩展（1/cos(θ)）会欠覆盖远端 → 屏幕顶部灰带，且过度覆盖近端 → 调度浪费。
+   * 取真实可视梯形的 AABB 能精确覆盖可见地面，倾斜角任意都成立。
    */
   get extent(): [number, number, number, number] {
     const target = this.controls.target;
     const camPos = this.camera.position;
-    const dist = camPos.distanceTo(target);
+
     const vFov = THREE.MathUtils.degToRad(this.camera.fov);
+    const halfV = Math.tan(vFov / 2);
+    const halfH = halfV * this.camera.aspect;
 
-    // 计算 polar angle（相机与垂直方向的夹角）
-    const heightDiff = Math.abs(camPos.z - target.z);
-    const polarAngle = Math.acos(Math.min(1, heightDiff / Math.max(dist, 1)));
+    // 相机局部基：fwd（视线朝向）、right（屏幕右）、up2（屏幕上）。
+    // 注意右手系：right = fwd × up，up2 = right × fwd。
+    const fwd = new THREE.Vector3()
+      .subVectors(target, camPos)
+      .normalize();
+    const up = new THREE.Vector3(0, 0, 1);
+    const right = new THREE.Vector3().crossVectors(fwd, up);
+    // 近正俯视（polar≈0）时 fwd ∥ up → right 退化。minPolarAngle(0.15) 已挡，
+    // 防御性兜底：退化时退回对称矩形近似。
+    if (right.lengthSq() < 1e-12) {
+      const dist = camPos.distanceTo(target);
+      const halfHt = halfV * dist;
+      const halfWd = halfHt * this.camera.aspect;
+      const MAXd = PerspectiveMapController.MAX_EXTENT_HALF;
+      return [
+        Math.max(target.x - MAXd, target.x - halfWd),
+        Math.max(target.y - MAXd, target.y - halfHt),
+        Math.min(target.x + MAXd, target.x + halfWd),
+        Math.min(target.y + MAXd, target.y + halfHt),
+      ];
+    }
+    right.normalize();
+    const up2 = new THREE.Vector3().crossVectors(right, fwd);
 
-    // 基础半尺寸（垂直俯视时的近似）
-    const halfH = Math.tan(vFov / 2) * dist;
-    const aspect = this.camera.aspect;
-    const halfW = halfH * aspect;
-
-    // 倾斜补偿：当 polar angle > 0 时，远端地面覆盖增大
-    // 使用保守的扩展因子，确保远端瓦片不被遗漏
-    // cos(polarAngle) 在 0° 时为 1（无扩展），在 80° 时约 0.17（扩展约 6 倍）
-    const cosPolar = Math.cos(polarAngle);
-    const tiltFactor = cosPolar > 0.1 ? 1 / cosPolar : 10; // 钳位防止极端值
-    // 对宽度和高度都应用扩展（倾斜时两侧也变宽）
-    const expandedHalfW = halfW * Math.min(tiltFactor, 4);
-    const expandedHalfH = halfH * Math.min(tiltFactor, 4);
-
-    // 硬钳位：防止单次 extent 超过半个地球周长
+    // 四角视线方向（不必归一化：交点 t = -camPos.z / dir.z 随 |dir| 反比，结果不变）
     const MAX = PerspectiveMapController.MAX_EXTENT_HALF;
+    let x0 = Infinity, y0 = Infinity, x1 = -Infinity, y1 = -Infinity;
+    let aboveHorizon = false;
+    for (const sx of [-1, 1]) {
+      for (const sy of [-1, 1]) {
+        const dir = new THREE.Vector3()
+          .copy(fwd)
+          .addScaledVector(right, sx * halfH)
+          .addScaledVector(up2, sy * halfV);
+        if (dir.z >= 0) {
+          // 视线越过地平线（无地面交点，极远）→ 钳位到半个地球
+          aboveHorizon = true;
+          continue;
+        }
+        const t = -camPos.z / dir.z;
+        const gx = camPos.x + t * dir.x;
+        const gy = camPos.y + t * dir.y;
+        if (gx < x0) x0 = gx;
+        if (gy < y0) y0 = gy;
+        if (gx > x1) x1 = gx;
+        if (gy > y1) y1 = gy;
+      }
+    }
+
+    if (aboveHorizon) {
+      x0 = -MAX; y0 = -MAX; x1 = MAX; y1 = MAX;
+    }
+
     return [
-      Math.max(target.x - MAX, target.x - expandedHalfW),
-      Math.max(target.y - MAX, target.y - expandedHalfH),
-      Math.min(target.x + MAX, target.x + expandedHalfW),
-      Math.min(target.y + MAX, target.y + expandedHalfH),
+      Math.max(target.x - MAX, x0),
+      Math.max(target.y - MAX, y0),
+      Math.min(target.x + MAX, x1),
+      Math.min(target.y + MAX, y1),
     ];
   }
 

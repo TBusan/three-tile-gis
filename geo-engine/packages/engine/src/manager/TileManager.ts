@@ -82,6 +82,15 @@ export class TileManager {
   private _schemeZooms = new Map<string, number>();
 
   /**
+   * 底图/坐标系切换代际号：schemeId → 当前代际。
+   *
+   * resetScheme 递增代际；_loadTile 捕获进入时的代际，完成时若代际已变
+   * （reset 之后才完成、与 abort 竞争的旧代加载）则丢弃结果，防止旧底图
+   * 瓦片重新回插 _loadedTiles / cache。
+   */
+  private _schemeGen = new Map<string, number>();
+
+  /**
    * 渐进式父瓦片占位集合：记录因“渐进式显示”注入的父瓦片 key。
    * 当其子瓦片加载完成后，父瓦片从 _loadedTiles 中移除。
    */
@@ -92,6 +101,15 @@ export class TileManager {
 
   /** 失败后的冷却重试间隔（毫秒）。超过后经下一次调度重试。 */
   private static readonly FAIL_RETRY_BACKOFF_MS = 5000;
+
+  /**
+   * _nullLayers 容量上限 — 防止长时间平移浏览时空瓦片记录无界增长。
+   *
+   * 空瓦片（无要素区域返回 null）的记录只在同瓦片同层后续产出内容时删除，
+   * 否则条目永久残留。超限时清空重建（同 TileScheduler._loadedParents 模式），
+   * 仅影响「空瓦片跳过」的命中精度（清空后最多重试一次重新确认），无正确性影响。
+   */
+  private static readonly NULL_LAYERS_MAX = 8192;
 
   /**
    * 占位父瓦片硬性生命周期上限（毫秒）— 安全网，非主要淘汰机制。
@@ -404,6 +422,54 @@ export class TileManager {
     this._schemeZooms.clear();
     this._parentPlaceholders.clear();
     this._nullLayers.clear();
+    this._schemeGen.clear();
+  }
+
+  /**
+   * 底图/坐标系切换：清除某一 scheme 的全部瓦片状态并终止在途加载。
+   *
+   * 用于 Engine.replaceLayer（底图切换）：新底图与旧底图共用同一 schemeId
+   * （如 "xyz"），旧底图已加载瓦片必须整体移除（LRU cache 一并释放 GPU 资源），
+   * 否则会与新材料混合显示。其它 scheme 的图层（矢量/检查板等）不受影响。
+   *
+   * 同时递增该 scheme 的代际号：_loadTile 中在 reset 之后才完成的旧代加载
+   * （数据源忽略 signal / 解码已在途）被代际检查丢弃，防止旧底图瓦片回插。
+   */
+  resetScheme(schemeId: string): void {
+    const prefix = `${schemeId}:`;
+    // 代际递增：后续完成的旧代加载全部失效
+    this._schemeGen.set(schemeId, (this._schemeGen.get(schemeId) ?? 0) + 1);
+
+    // 1. 终止在途加载（TileManager 持有的 controller + 调度器队列）
+    for (const [key, entry] of this._loading) {
+      if (key.startsWith(prefix)) {
+        entry.controller.abort();
+        this._loading.delete(key);
+      }
+    }
+    this.scheduler.abortScheme(prefix);
+
+    // 2. 移除已加载瓦片（不直接 dispose —— 资源由 cache 统一释放一次）
+    for (const [key, tile] of this._loadedTiles) {
+      if (tile.key.schemeId === schemeId) {
+        this._loadedTiles.delete(key);
+      }
+    }
+
+    // 3. 释放 LRU cache 中该 scheme 全部瓦片的资源（纹理/材质/非共享几何）
+    this.cache.clearByPrefix(prefix);
+
+    // 4. 清理状态跟踪：占位父瓦片 / 空层记录 / 失败冷却 / 级别状态
+    for (const key of this._parentPlaceholders) {
+      if (key.startsWith(prefix)) this._parentPlaceholders.delete(key);
+    }
+    for (const key of this._nullLayers.keys()) {
+      if (key.startsWith(prefix)) this._nullLayers.delete(key);
+    }
+    for (const key of this._failTimes.keys()) {
+      if (key.startsWith(prefix)) this._failTimes.delete(key);
+    }
+    this._schemeZooms.delete(schemeId);
   }
 
   // ---- private ----
@@ -785,6 +851,8 @@ export class TileManager {
   ): Promise<void> {
     const cacheKey = tileKeyToString(req.tileKey);
     const memKey = TileManager._memKey(req.tileKey);
+    // 捕获代际号：完成时若 resetScheme 已递增（底图切换），丢弃本加载。
+    const gen = this._schemeGen.get(req.tileKey.schemeId) ?? 0;
 
     // 检查是否已有 Tile 实例（同 key 多层共享）
     let tile = this._loadedTiles.get(cacheKey);
@@ -865,6 +933,11 @@ export class TileManager {
               hadFailure = true;
               let set = this._nullLayers.get(memKey);
               if (!set) {
+                // 容量上限：防长时间平移浏览时空瓦片记录无界增长。
+                // 超限清空重建，仅影响「空瓦片跳过」命中精度，无正确性影响。
+                if (this._nullLayers.size >= TileManager.NULL_LAYERS_MAX) {
+                  this._nullLayers.clear();
+                }
                 set = new Set();
                 this._nullLayers.set(memKey, set);
               }
@@ -876,6 +949,28 @@ export class TileManager {
           hadFailure = true;
         }
         // AbortError → 取消，不计入失败
+      }
+
+      // 底图切换代际守卫：resetScheme 之后才完成（与 abort 竞争）的旧代加载全部
+      // 丢弃 —— 不写入 _loadedTiles / cache、不记录失败冷却，防止旧底图瓦片回插
+      // 与新底图混合显示。已产出的 content 显式 dispose，避免 GPU 资源泄漏。
+      if ((this._schemeGen.get(req.tileKey.schemeId) ?? 0) !== gen) {
+        for (const content of tile.contents) {
+          if (!content.disposed) content.dispose();
+        }
+        tile.contents.length = 0;
+        tile.state = "unloaded";
+        return;
+      }
+
+      // 共享瓦片守卫：加载期间该瓦片可能被 cache.trim 淘汰并 dispose（内存预算回收）。
+      // 迟到的 content（含已释放 GPU 资源的 renderObject）不能回插到已 dispose 的瓦片，
+      // 否则 demo syncScene 会把已释放 mesh 挂回场景渲染已释放资源。
+      // contents 是 readonly，原地删除 disposed 项（倒序遍历避免索引偏移）。
+      if (tile.contents.some((c) => c.disposed)) {
+        for (let i = tile.contents.length - 1; i >= 0; i--) {
+          if (tile.contents[i].disposed) tile.contents.splice(i, 1);
+        }
       }
 
       if (tile.contents.length > 0) {

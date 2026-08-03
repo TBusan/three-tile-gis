@@ -49,6 +49,34 @@
     }
     #panel button:hover { background: #3a5f7f; }
     #panel button.off { background: #555; color: #999; }
+    #basemap-switcher {
+      position: absolute;
+      top: 12px; right: 12px;
+      z-index: 2;
+      display: flex;
+      gap: 4px;
+      padding: 4px;
+      background: rgba(0, 0, 0, 0.78);
+      border: 1px solid #444;
+      border-radius: 8px;
+      pointer-events: auto;
+      user-select: none;
+    }
+    #basemap-switcher button {
+      padding: 4px 10px;
+      font-size: 12px;
+      color: #e0e0e0;
+      background: transparent;
+      border: 1px solid transparent;
+      border-radius: 5px;
+      cursor: pointer;
+    }
+    #basemap-switcher button:hover { background: rgba(255, 255, 255, 0.12); }
+    #basemap-switcher button.active {
+      background: #2a6df4;
+      border-color: #5a9dff;
+      color: #fff;
+    }
   </style>
 </head>
 <body>
@@ -80,6 +108,12 @@
       <div style="pointer-events:auto">
         <button id="btn-checker">棋盘格: ON</button>
       </div>
+    </div>
+    <div id="basemap-switcher">
+      <button data-kind="osm" class="active">OSM</button>
+      <button data-kind="arcgis-img">影像</button>
+      <button data-kind="arcgis-street">街道</button>
+      <button data-kind="mapbox">Mapbox</button>
     </div>
   </div>
   <script type="module" src="./src/main.ts"></script>

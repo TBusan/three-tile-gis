@@ -119,4 +119,38 @@ describe("TileScheduler", () => {
     expect(s.loadingCount).toBe(0);
     expect(s.queueLength).toBe(0);
   });
+
+  it("abortScheme：只终止匹配前缀的在途加载并过滤队列", () => {
+    const s = new TileScheduler();
+    const c1 = new AbortController();
+    const c2 = new AbortController();
+    const spy1 = vi.spyOn(c1, "abort");
+    const spy2 = vi.spyOn(c2, "abort");
+
+    s.startLoading(makeTileKey("xyz", "12/356/170", 12), c1);
+    s.startLoading(makeTileKey("proj", "0-0", 0), c2);
+
+    // 混合 scheme 排队：一个 xyz、一个 proj
+    s.schedule([
+      makeReq("a", 100, 0.5), // proj scheme
+      {
+        tileKey: makeTileKey("xyz", "3/1/2", 3),
+        layerIds: ["L1"],
+        distanceToCamera: 100,
+        screenArea: 0.5,
+        inFrustum: true,
+      },
+    ]);
+    expect(s.loadingCount).toBe(2);
+    expect(s.queueLength).toBe(2);
+
+    s.abortScheme("xyz:");
+
+    // xyz 在途被 abort，proj 保留
+    expect(spy1).toHaveBeenCalledOnce();
+    expect(spy2).not.toHaveBeenCalled();
+    expect(s.loadingCount).toBe(1);
+    // 队列里 xyz 被过滤，只剩 proj
+    expect(s.queueLength).toBe(1);
+  });
 });

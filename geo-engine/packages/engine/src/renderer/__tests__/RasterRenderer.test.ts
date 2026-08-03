@@ -43,9 +43,10 @@ vi.mock("three", () => {
       dispose: mockDispose,
       map: null,
     })),
-    Mesh: vi.fn().mockImplementation(() => ({
-      geometry: { dispose: mockDispose },
-      material: { dispose: mockDispose, map: { dispose: mockDispose } },
+    Mesh: vi.fn().mockImplementation((geometry, material) => ({
+      // 透传构造参数：让测试能断言共享几何的实例同一性
+      geometry,
+      material,
       position: { set: mockSet },
       renderOrder: undefined,
     })),
@@ -297,5 +298,104 @@ describe("RasterRenderer", () => {
       tile.key.level,
       2 / 256, // tileBleedTexels(2) / max(width,height)(256)
     );
+  });
+
+  // ---- 几何共享（无重投影瓦片）----
+
+  it("共享：同 (level, bleedUV, 无 reprojector) 复用同一 BufferGeometry", async () => {
+    const renderer = new RasterRenderer();
+    const tileA = makeTile();
+    const tileB = makeTile(); // 同 bounds/origin/level，无 reprojector
+    const createSpy = vi.spyOn((renderer as any).quality, "createGeometry");
+    const mockBitmap = {
+      width: 256,
+      height: 256,
+      close: () => {},
+    } as unknown as ImageBitmap;
+
+    const contentA = await renderer.createContent(mockBitmap, tileA);
+    const contentB = await renderer.createContent(mockBitmap, tileB);
+
+    // 第二次命中 _geomCache，不再调用 createGeometry
+    expect(createSpy).toHaveBeenCalledTimes(1);
+    expect((contentB.renderObjects[0].object as any).geometry).toBe(
+      (contentA.renderObjects[0].object as any).geometry,
+    );
+  });
+
+  it("共享键含 level：不同 level 的瓦片不共享几何", async () => {
+    const renderer = new RasterRenderer();
+    const tile10 = makeTile(); // level 10
+    const tile11 = new Tile(
+      makeTileKey("xyz", "11/1000/600", 11),
+      bounds,
+      origin,
+    );
+    const createSpy = vi.spyOn((renderer as any).quality, "createGeometry");
+    const mockBitmap = {
+      width: 256,
+      height: 256,
+      close: () => {},
+    } as unknown as ImageBitmap;
+
+    const contentA = await renderer.createContent(mockBitmap, tile10);
+    const contentB = await renderer.createContent(mockBitmap, tile11);
+
+    expect(createSpy).toHaveBeenCalledTimes(2);
+    expect((contentB.renderObjects[0].object as any).geometry).not.toBe(
+      (contentA.renderObjects[0].object as any).geometry,
+    );
+  });
+
+  it("不共享：带 reprojector 的瓦片每次新建几何（逐瓦片重投影路径）", async () => {
+    const renderer = new RasterRenderer();
+    const tileRepA = makeTile();
+    tileRepA.reprojector = (u: number, v: number) => ({
+      x: u * 256,
+      y: v * 256,
+    });
+    const tileRepB = makeTile();
+    tileRepB.reprojector = (u: number, v: number) => ({
+      x: u * 256,
+      y: v * 256,
+    });
+    const createSpy = vi.spyOn((renderer as any).quality, "createGeometry");
+    const mockBitmap = {
+      width: 256,
+      height: 256,
+      close: () => {},
+    } as unknown as ImageBitmap;
+
+    const contentA = await renderer.createContent(mockBitmap, tileRepA);
+    const contentB = await renderer.createContent(mockBitmap, tileRepB);
+
+    expect(createSpy).toHaveBeenCalledTimes(2); // 不查缓存，每次新建
+    expect((contentB.renderObjects[0].object as any).geometry).not.toBe(
+      (contentA.renderObjects[0].object as any).geometry,
+    );
+  });
+
+  it("dispose：共享几何不被瓦片 dispose 释放，由 renderer.dispose() 统一释放", async () => {
+    const renderer = new RasterRenderer();
+    const tileA = makeTile();
+    const tileB = makeTile();
+    const mockBitmap = {
+      width: 256,
+      height: 256,
+      close: () => {},
+    } as unknown as ImageBitmap;
+
+    const contentA = await renderer.createContent(mockBitmap, tileA);
+    await renderer.createContent(mockBitmap, tileB);
+    const geom = (contentA.renderObjects[0].object as any).geometry;
+    const disposeSpy = vi.spyOn(geom, "dispose");
+
+    // 瓦片 dispose → 共享几何不释放（同一实例仍被 contentB 引用）
+    contentA.dispose();
+    expect(disposeSpy).not.toHaveBeenCalled();
+
+    // renderer.dispose() → 统一释放全部共享几何
+    renderer.dispose();
+    expect(disposeSpy).toHaveBeenCalledTimes(1);
   });
 });

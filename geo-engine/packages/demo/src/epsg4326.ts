@@ -30,6 +30,7 @@ import {
   DefaultMaterialFactory,
   SubdividedPlane,
   PerspectiveMapController,
+  tileKeyToString,
   type Tile,
   type ILayerRenderer,
   type IProjectCRS,
@@ -308,14 +309,34 @@ async function main() {
   new ResizeObserver(onResize).observe(app);
   onResize();
 
-  // ── Layer 1: XYZ 底图（OSM 街图）──────────────────────────────
+  // ── Layer 1: XYZ 底图（OSM / ArcGIS / Mapbox）────────────────
   // XYZTileScheme 将 EPSG:3857 瓦片重投影到 EPSG:4326 经纬度空间
   // SubdividedPlane(4, true) 自适应细分：低 zoom 时网格更密，消除投影弯曲
+  // ArcGIS 用 {y}（与 OSM 同向，无需 {-y}）；Mapbox 需 token（空则点击弹窗提示）。
+  // Mapbox token 申请：https://account.mapbox.com/
+  const MAPBOX_TOKEN = ""; // 填你的 token
+
+  const BASEMAPS = {
+    osm: {
+      name: "OSM 街图",
+      url: "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+    },
+    "arcgis-img": {
+      name: "ArcGIS 影像",
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    },
+    "arcgis-street": {
+      name: "ArcGIS 街道",
+      url: "https://server.arcgisonline.com/ArcGIS/rest/services/World_Street_Map/MapServer/tile/{z}/{y}/{x}",
+    },
+    mapbox: {
+      name: "Mapbox 卫星",
+      url: `https://api.mapbox.com/styles/v1/mapbox/satellite-streets-v12/tiles/256/{z}/{x}/{y}?access_token=${MAPBOX_TOKEN}`,
+    },
+  } as const;
+  type BasemapKind = keyof typeof BASEMAPS;
+
   const xyzScheme = new XYZTileScheme(crs, 0, 18);
-  const xyzSource = new XYZTileSource(
-    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
-    { minZoom: 0, maxZoom: 18 },
-  );
   const xyzRenderer = new RasterRenderer({
     name: "basemap-renderer",
     // 关键：启用自适应细分（adaptive=true）
@@ -324,13 +345,21 @@ async function main() {
     quality: new SubdividedPlane(4, true),
   });
 
-  const basemapLayer = new RasterLayer({
-    name: "OSM 街图底图",
-    tileScheme: xyzScheme,
-    dataSource: xyzSource,
-    renderer: xyzRenderer,
-    zIndex: 0,
-  });
+  function makeBasemapLayer(kind: BasemapKind): RasterLayer {
+    return new RasterLayer({
+      id: `basemap-${kind}`,
+      name: `${BASEMAPS[kind].name}底图`,
+      tileScheme: xyzScheme,
+      dataSource: new XYZTileSource(BASEMAPS[kind].url, {
+        minZoom: 0,
+        maxZoom: 18,
+      }),
+      renderer: xyzRenderer, // 复用共享渲染器（_geomCache 复用，零几何重建）
+      zIndex: 0, // 与矢量层 zIndex=10 的排序关系不变
+    });
+  }
+
+  let currentBasemap = makeBasemapLayer("osm");
 
   // ── Layer 2: 矢量叠加（点/线/面，坐标 = 经纬度度值）──────────
   const sampleGeoJSON = createSampleGeoJSON(crs);
@@ -377,7 +406,7 @@ async function main() {
         name: "EPSG:4326 Demo",
         visible: true,
         opacity: 1,
-        layers: [basemapLayer, vectorLayer],
+        layers: [currentBasemap, vectorLayer],
       },
     ],
     cameraController: mapController,
@@ -387,11 +416,6 @@ async function main() {
 
   // ── 场景同步 ─────────────────────────────────────────────────
   const sceneTiles = new Map<string, THREE.Group>();
-
-  // 已淘汰瓦片的淡出集合：key → { group, startTime }。
-  // 淘汰时先淡出再移除，把「新旧级别瓦片硬切」变成软过渡，
-  // 缓解缩放过程中粗粒度父瓦片与细粒度子瓦片拼接处内容对不上的观感。
-  const fadeOuts = new Map<string, { group: THREE.Group; startTime: number }>();
 
   function forEachMaterial(
     group: THREE.Group,
@@ -419,6 +443,34 @@ async function main() {
     worldRoot.remove(group);
   }
 
+  /**
+   * 切换底图：瞬时清空旧底图瓦片后替换 layer（零重叠，不交叉淡入 — 与条纹修复同哲学）。
+   * 引擎 `replaceLayer` 会 resetScheme("xyz")：abort 在途加载、清空旧源缓存并丢弃
+   * 旧代完成回调（代际守卫），旧底图瓦片不会回插。矢量层用 project-0.02 scheme，
+   * 不受影响。
+   */
+  function switchBasemap(kind: BasemapKind) {
+    if (kind === currentBasemap.id.slice("basemap-".length)) return;
+    if (kind === "mapbox" && !MAPBOX_TOKEN) {
+      alert("请先在源码顶部填 MAPBOX_TOKEN（https://account.mapbox.com/）");
+      return;
+    }
+    const next = makeBasemapLayer(kind);
+    // 瞬时清空旧底图瓦片（key 前缀 "xyz:" 只命中底图，不动矢量层）
+    for (const [key, group] of sceneTiles) {
+      if (key.startsWith("xyz:")) {
+        disposeGroup(group);
+        sceneTiles.delete(key);
+      }
+    }
+    engine.replaceLayer(currentBasemap.id, next);
+    currentBasemap = next;
+    document.querySelectorAll("#basemap-switcher button").forEach((btn) => {
+      const el = btn as HTMLElement;
+      el.classList.toggle("active", el.dataset.kind === kind);
+    });
+  }
+
   function syncScene() {
     const loaded = engine.tileManager.loadedTiles;
     const origin = engine.floatingOrigin.current;
@@ -426,37 +478,25 @@ async function main() {
     // Floating Origin 偏移
     worldRoot.position.set(-origin.x, -origin.y, 0);
 
+    // LOD 切换：旧级别父瓦片被 TileManager 淘汰后其子瓦片恢复可见。这些子瓦片
+    // 与刚淘汰的父瓦片区域重叠 → 必须满透明度瞬时出现（跳过淡入），否则半透明
+    // 子瓦片叠在残留父瓦片上 → 条纹/莫尔纹。这里收集本次同步中被淘汰的 key。
+    const evictedKeys = new Set<string>();
+    for (const key of sceneTiles.keys()) {
+      if (!loaded.has(key)) evictedKeys.add(key);
+    }
+
     // 添加新 tile / 补挂共享瓦片迟到的 content
     for (const [key, tile] of loaded) {
       // 原子 LOD：祖先更粗瓦片仍上屏时隐藏本瓦片（避免区域内 z/z-1 内容混杂 =
       // 瓦片错落的视觉根因）。祖先被淘汰后本瓦片自动恢复可见。
       if (engine.tileManager.isTileHidden(tile)) {
-        const g = sceneTiles.get(key) ?? fadeOuts.get(key)?.group;
+        const g = sceneTiles.get(key);
         sceneTiles.delete(key);
-        fadeOuts.delete(key);
         if (g) disposeGroup(g);
         continue;
       }
-      let existing = sceneTiles.get(key);
-      if (!existing && fadeOuts.has(key)) {
-        // 瓦片被淘汰后重新出现在视野内：取消淡出，恢复旧 group，
-        // 避免「淡出中的旧 group」与「新创建的 group」同时渲染造成闪动。
-        const fo = fadeOuts.get(key)!;
-        fadeOuts.delete(key);
-        forEachMaterial(fo.group, (mat) => {
-          if ((mat as any).userData?.shared) return;
-          if ("opacity" in mat) {
-            const base: number =
-              (mat as any).__baseOpacity ?? (mat as any).__targetOpacity ?? 1;
-            mat.opacity = base;
-            delete (mat as any).__fadeOutFrom;
-          }
-        });
-        sceneTiles.set(key, fo.group);
-        existing = fo.group;
-        // 恢复后重新淡入，避免瞬间弹出
-        (existing as any).__fadeStart = performance.now();
-      }
+      const existing = sceneTiles.get(key);
       if (existing) {
         // 共享瓦片：其他 layer 后到的 content 需要补挂，否则该 layer 永远缺失
         const fading = (existing as any).__fadeStart != null;
@@ -507,43 +547,45 @@ async function main() {
       worldRoot.add(group);
       sceneTiles.set(key, group);
 
+      // LOD 替换瓦片（其某个祖先在本轮被淘汰）必须满透明度瞬时上屏：
+      // 若它也淡入，半透明新瓦片与残留旧瓦片重叠 → 条纹/莫尔纹。
+      let replacesEvicted = false;
+      {
+        let parent: TileKey | null = tile.scheme?.getParentKey(tile.key) ?? null;
+        while (parent) {
+          if (evictedKeys.has(tileKeyToString(parent))) {
+            replacesEvicted = true;
+            break;
+          }
+          parent = tile.scheme!.getParentKey(parent);
+        }
+      }
+
       // 淡入动画：记录目标透明度后置 0。用「加入场景的时刻」而非 content.createdAt
       // —— createdAt 是加载开始时刻，慢速加载的瓦片出现时淡入期早已过去，会直接"弹出"。
       // 跳过共享材质（DefaultMaterialFactory 矢量材质被所有瓦片共用）：直接改它们
       // 会让整层一起闪动；纯矢量瓦片整组直接满透明度出现，不走淡入。
       let fadeable = false;
-      forEachMaterial(group, (mat) => {
-        if ((mat as any).userData?.shared) return;
-        fadeable = true;
-        (mat as any).__baseOpacity = mat.opacity; // 持久记录目标透明度（恢复/淡出用）
-        (mat as any).__targetOpacity = mat.opacity;
-        mat.transparent = true;
-        mat.opacity = 0;
-      });
+      if (!replacesEvicted) {
+        forEachMaterial(group, (mat) => {
+          if ((mat as any).userData?.shared) return;
+          fadeable = true;
+          (mat as any).__baseOpacity = mat.opacity; // 持久记录目标透明度（恢复/淡出用）
+          (mat as any).__targetOpacity = mat.opacity;
+          mat.transparent = true;
+          mat.opacity = 0;
+        });
+      }
       if (fadeable) (group as any).__fadeStart = performance.now();
     }
 
-    // 移除淘汰的 tile：先淡出再移除（软过渡，避免新旧级别瓦片硬切）。
+    // 移除淘汰的 tile：瞬时移除（LOD 切换零重叠，不再走 fadeOuts 交叉淡出）。
     // 纯矢量瓦片（全部共享材质）无可淡出材质 → 立即移除。共享材质无法单独淡出
     // （淡出它们会让整层闪动），屏幕边缘的矢量瓦片瞬时消失观感可接受。
     for (const [key, group] of sceneTiles) {
       if (!loaded.has(key)) {
         sceneTiles.delete(key);
-        // 记录每个材质的当前透明度作为淡出起点
-        let fadeable = false;
-        forEachMaterial(group, (mat) => {
-          if ((mat as any).userData?.shared) return;
-          if ("opacity" in mat) {
-            fadeable = true;
-            (mat as any).__fadeOutFrom = mat.opacity;
-            mat.transparent = true;
-          }
-        });
-        if (fadeable) {
-          fadeOuts.set(key, { group, startTime: performance.now() });
-        } else {
-          disposeGroup(group);
-        }
+        disposeGroup(group);
       }
     }
   }
@@ -553,6 +595,8 @@ async function main() {
   const frameTimeEl = document.getElementById("frame-time")!;
   let fpsFrames = 0;
   let fpsLastTime = performance.now();
+  // syncScene 节流时间戳：结构性同步与引擎 UPDATE_INTERVAL_MS(100ms) 对齐
+  let lastSyncTs = 0;
 
   function render() {
     // FPS 统计
@@ -565,12 +609,28 @@ async function main() {
       fpsEl.textContent = fps.toFixed(0);
       fpsEl.style.color = fps >= 50 ? "#7CFC00" : fps >= 30 ? "#FFD700" : "#FF6B6B";
       frameTimeEl.textContent = `(${frameMs.toFixed(1)} ms/帧)`;
+      // HUD 随 FPS 统计同频刷新（500ms）：消除每帧 5 次 DOM 写导致的布局抖动
+      updateHUD(
+        crs.name,
+        mapController.controls.target.x,
+        mapController.controls.target.y,
+        mapController.resolution,
+        engine.tileManager.loadedTiles.size,
+        engine.tileManager.scheduler.queueLength,
+        engine.tileManager.scheduler.loadingCount,
+      );
       fpsFrames = 0;
       fpsLastTime = fpsNow;
     }
 
-    // 同步瓦片
-    syncScene();
+    // 同步瓦片：100ms 节流（与引擎 UPDATE_INTERVAL_MS 对齐）。
+    // syncScene 的结构性遍历在调度停顿期间结果不变，无需每帧执行；
+    // 新瓦片出现 ≤100ms 延迟，观感不可察觉。淡入/淡出动画每帧独立推进。
+    const syncNow = performance.now();
+    if (syncNow - lastSyncTs >= 100) {
+      syncScene();
+      lastSyncTs = syncNow;
+    }
 
     // 渲染（相机临时偏移到局部坐标）
     const origin = engine.floatingOrigin.current;
@@ -593,9 +653,8 @@ async function main() {
       camera.updateProjectionMatrix();
     }
 
-    // 淡入动画 (300ms)
+    // 淡入动画 (300ms) — 仅平移进入的新区域瓦片。LOD 替换瓦片满透明度瞬时上屏。
     const FADE_DURATION = 300;
-    const FADE_OUT_DURATION = 400;
     const now = performance.now();
     for (const [, group] of sceneTiles) {
       const start: number | undefined = (group as any).__fadeStart;
@@ -619,55 +678,18 @@ async function main() {
       if (done) delete (group as any).__fadeStart;
     }
 
-    // ── Fade-out animation (被淘汰的旧级别瓦片) ──────────────
-    // 旧瓦片被淘汰时淡出再移除：粗粒度父瓦片淡出的同时细粒度子瓦片已淡入，
-    // 让「路→田」的硬切变成一段平滑过渡，而不是瞬间替换。
-    for (const [key, fo] of fadeOuts) {
-      const elapsed = now - fo.startTime;
-      const done = elapsed >= FADE_OUT_DURATION;
-      const progress = done ? 1 : Math.min(1, elapsed / FADE_OUT_DURATION);
-
-      forEachMaterial(fo.group, (mat) => {
-        if ((mat as any).userData?.shared) return;
-        if (!("opacity" in mat)) return;
-        if (done) {
-          // 淡出完成：必须恢复透明度，不能停在 0。
-          // 材质可能是共享的（DefaultMaterialFactory 的矢量材质被所有瓦片共用），
-          // 或该瓦片仍留在 LRU cache 中（淡出时瓦片通常未从 cache 移除）。
-          // 停在 0 会让「共享同一材质的其它瓦片」以及「从 cache 回屏的瓦片」
-          // 永久不可见且无法通过淡入恢复（淡入捕获到的 __baseOpacity 也是 0）。
-          const base: number = (mat as any).__baseOpacity ?? 1;
-          mat.opacity = base;
-          mat.transparent = base < 1;
-          delete (mat as any).__fadeOutFrom;
-        } else {
-          const from: number = (mat as any).__fadeOutFrom ?? 1;
-          mat.transparent = true;
-          mat.opacity = from * (1 - progress);
-        }
-      });
-
-      if (done) {
-        disposeGroup(fo.group);
-        fadeOuts.delete(key);
-      }
-    }
-
-    // HUD
-    updateHUD(
-      crs.name,
-      mapController.controls.target.x,
-      mapController.controls.target.y,
-      mapController.resolution,
-      engine.tileManager.loadedTiles.size,
-      engine.tileManager.scheduler.queueLength,
-      engine.tileManager.scheduler.loadingCount,
-    );
-
     requestAnimationFrame(render);
   }
 
   requestAnimationFrame(render);
+
+  // 底图切换按钮
+  document.querySelectorAll("#basemap-switcher button").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const el = btn as HTMLElement;
+      switchBasemap(el.dataset.kind as BasemapKind);
+    });
+  });
 }
 
 main();

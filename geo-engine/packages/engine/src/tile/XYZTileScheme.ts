@@ -257,6 +257,12 @@ export class XYZTileScheme implements ITileScheme {
   getReprojector(
     key: TileKey,
   ): ((u: number, v: number) => { x: number; y: number }) | null {
+    // 恒等短路：目标 CRS 即 Web Mercator（EPSG:3857）时，瓦片在目标 CRS 下
+    // 是精确矩形（getTileBounds 的包围盒 = 瓦片本身），重投影退化为恒等。
+    // 返回 null → 渲染器走无重投影路径：同 level 瓦片的几何全同，可共享
+    // BufferGeometry（省逐顶点投影 + 每瓦片几何创建/上传 + computeVertexNormals）。
+    if (this.targetCrs.name === this._wm.name) return null;
+
     const { z, x, y } = this._parseId(key.id);
     const { WORLD_HALF, WORLD_SIZE } = XYZTileScheme;
 

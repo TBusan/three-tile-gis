@@ -130,6 +130,27 @@ export class Engine {
     this.layerManager.clear();
   }
 
+  /**
+   * 替换一个图层（底图切换用）。
+   *
+   * 从所属组移除旧图层、加入新图层（保持原组与 zIndex 排序），并清除旧图层
+   * tileScheme 对应的全部已加载瓦片与在途加载（TileManager.resetScheme），
+   * 避免旧底图瓦片与新底图混合显示。新图层须与被替换图层使用同一 tileScheme
+   * 或等价 schemeId（如都基于 XYZTileScheme），以便无缝沿用同 key 的调度。
+   */
+  replaceLayer(oldLayerId: string, newLayer: ILayer): void {
+    const oldLayer = this.layerManager.getLayer(oldLayerId);
+    if (!oldLayer) throw new Error(`Layer "${oldLayerId}" not found`);
+    const group = this.layerManager.groups.find((g) =>
+      g.layers.some((l) => l.id === oldLayerId),
+    );
+    if (!group) throw new Error(`Layer "${oldLayerId}" is not in any group`);
+
+    this.layerManager.removeLayer(oldLayerId);
+    this.layerManager.addLayerToGroup(newLayer, group.id);
+    this.tileManager.resetScheme(oldLayer.tileScheme.schemeId);
+  }
+
   // ---- Coordinate conversion (§11) ----
 
   /**

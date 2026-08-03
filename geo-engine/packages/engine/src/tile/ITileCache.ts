@@ -21,6 +21,12 @@ export interface ITileCache<T extends Disposable> {
   readonly count: number;
   /** 当前已使用的字节数 */
   readonly byteSize: number;
+  /**
+   * 按 key 前缀清除并释放缓存（用于底图/坐标系切换时整体淘汰某一 scheme 的瓦片）。
+   * key 以 prefix 开头的条目被 dispose 并移除，其余条目不受影响。
+   */
+  clearByPrefix(prefix: string): void;
+
   /** 清空所有缓存 */
   clear(): void;
 }

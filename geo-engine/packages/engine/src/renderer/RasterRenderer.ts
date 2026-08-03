@@ -72,6 +72,15 @@ export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
   private readonly _depthBiasPerLevel: number;
   private readonly _tileBleedTexels: number;
 
+  /**
+   * 共享几何缓存 — 无重投影瓦片（reprojector 为 null/undefined）的 BufferGeometry
+   * 仅由「级别 + 出血 + 相对包围盒」决定（SimplePlane 位置 = bounds − origin，
+   * ProjectTileScheme / 恒等 3857 瓦片在同级别下全同）。共享省每瓦片的
+   * BufferGeometry 创建 + computeVertexNormals + GPU 上传。
+   * 键含相对包围盒签名，任何 scheme 返回 null reprojector 时都安全。
+   */
+  private readonly _geomCache = new Map<string, THREE.BufferGeometry>();
+
   constructor(options: RasterRendererOptions = {}) {
     this.name = options.name ?? "raster-renderer";
     this.quality = options.quality ?? new SimplePlane();
@@ -110,7 +119,7 @@ export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
 
     // 2. 创建几何体（局部坐标）
     // XYZ 瓦片：tile.reprojector 提供逐顶点重投影（设计文档 §3.5）
-    // Project 瓦片：reprojector 为 undefined，线性插值 bounds
+    // Project 瓦片：reprojector 为 null/undefined，线性插值 bounds
     // 传入 tile.key.level 供自适应质量层按缩放级别选择网格密度（低 zoom 更细）
     // 边缘出血（默认 0 关闭）：>0 时向四边各扩展 tileBleedTexels 个纹素
     const bleedTexels = this._tileBleedTexels;
@@ -118,13 +127,43 @@ export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
       bleedTexels > 0 && data.width > 0
         ? bleedTexels / Math.max(data.width, data.height)
         : 0;
-    const geometry = this.quality.createGeometry(
-      tile.bounds,
-      tile.origin,
-      tile.reprojector,
-      tile.key.level,
-      bleedUV,
-    );
+
+    // 无重投影瓦片几何共享：reprojector 为 null/undefined 时，SimplePlane 的位置
+    // 只由 (bounds − origin, bleedUV) 决定（线性插值路径）。同级别 Project 瓦片 /
+    // 恒等 3857 瓦片（XYZTileScheme 恒等短路返回 null）的相对包围盒全同 →
+    // 共享同一 BufferGeometry，省每瓦片的几何创建 + computeVertexNormals + GPU 上传。
+    // 键含相对包围盒签名：任意 scheme 返回 null reprojector 都安全，
+    // 即使不同 scheme 同级别相对几何不同也不会误共享。
+    // 共享几何由 RasterRenderer 统一持有，瓦片 dispose 时不再释放（见下方 disposeFn）。
+    const shared = tile.reprojector == null;
+    let geometry: THREE.BufferGeometry;
+    if (shared) {
+      const geomKey =
+        `${this.quality.type}|${tile.key.level}|${bleedUV}|` +
+        `${tile.bounds[0] - tile.origin.x},${tile.bounds[1] - tile.origin.y},` +
+        `${tile.bounds[2] - tile.origin.x},${tile.bounds[3] - tile.origin.y}`;
+      const cached = this._geomCache.get(geomKey);
+      if (cached) {
+        geometry = cached;
+      } else {
+        geometry = this.quality.createGeometry(
+          tile.bounds,
+          tile.origin,
+          undefined,
+          tile.key.level,
+          bleedUV,
+        );
+        this._geomCache.set(geomKey, geometry);
+      }
+    } else {
+      geometry = this.quality.createGeometry(
+        tile.bounds,
+        tile.origin,
+        tile.reprojector,
+        tile.key.level,
+        bleedUV,
+      );
+    }
 
     // 3. 创建材质
     // polygonOffset 防止多图层叠加时 z-fighting：
@@ -154,7 +193,9 @@ export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
     // 5. 包装 RenderObject
     const ro = new RenderObject(mesh, (obj: unknown) => {
       const m = obj as THREE.Mesh;
-      m.geometry.dispose();
+      // 共享几何由 _geomCache 统一持有，瓦片 dispose 时不能释放
+      // （同一实例被多个 mesh 引用，释放一次会连坐其他瓦片）。
+      if (!shared) m.geometry.dispose();
       if (Array.isArray(m.material)) {
         for (const mat of m.material) mat.dispose();
       } else {
@@ -181,5 +222,13 @@ export class RasterRenderer implements ILayerRenderer<ImageBitmap> {
         }
       }
     }
+  }
+
+  /** 释放渲染器持有的全部共享几何缓存（渲染器销毁时调用）。 */
+  dispose(): void {
+    for (const geom of this._geomCache.values()) {
+      geom.dispose();
+    }
+    this._geomCache.clear();
   }
 }

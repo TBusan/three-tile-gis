@@ -1,5 +1,5 @@
 // geo-engine/packages/engine/src/core/__tests__/Engine.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { Engine } from "../Engine";
 import { CGCS2000GKCRS } from "../../crs/CGCS2000GK";
 import { RasterLayer } from "../../layer/RasterLayer";
@@ -11,7 +11,7 @@ import type { CrsBounds } from "../types";
 import type { TileContent } from "../../tile/TileContent";
 import type { Tile } from "../../tile/Tile";
 
-function makeFakeLayer(name: string, zIndex = 0): RasterLayer {
+function makeFakeLayer(name: string, zIndex = 0, id?: string): RasterLayer {
   const fakeSource: IDataSource = {
     dataType: "fake",
     crs: { name: "fk", units: "meter" } as IProjectCRS,
@@ -27,6 +27,7 @@ function makeFakeLayer(name: string, zIndex = 0): RasterLayer {
     disposeContent() {},
   };
   return new RasterLayer({
+    id,
     name,
     zIndex,
     tileScheme: new ProjectTileScheme(500),
@@ -186,5 +187,52 @@ describe("Engine", () => {
     expect(back.x).toBe(original.x);
     expect(back.y).toBe(original.y);
     expect(back.z).toBe(original.z);
+  });
+
+  it("replaceLayer：移除旧层、加入新层并重置旧 scheme 的瓦片", () => {
+    const container = { clientWidth: 800, clientHeight: 600 } as HTMLElement;
+    const engine = new Engine({
+      crs: new CGCS2000GKCRS(38),
+      container,
+      tileLoadFn: async () => null,
+      groups: [
+        {
+          id: "base",
+          name: "底图",
+          visible: true,
+          opacity: 1,
+          layers: [makeFakeLayer("L1", 0, "L1")],
+        },
+      ],
+    });
+
+    const oldLayer = engine.layerManager.getLayer("L1")!;
+    const resetSpy = vi.spyOn(engine.tileManager, "resetScheme");
+    const newLayer = makeFakeLayer("L2", 0, "L2");
+
+    engine.replaceLayer("L1", newLayer);
+
+    // 旧层从组与索引中移除，新层加入原组
+    expect(engine.layerManager.getLayer("L1")).toBeUndefined();
+    expect(engine.layerManager.getLayer("L2")).toBe(newLayer);
+    expect(engine.layerManager.groups[0].layers).toContain(newLayer);
+    expect(engine.layerManager.groups[0].layers).not.toContain(oldLayer);
+
+    // 旧底图 scheme（project-500）的瓦片被整体重置
+    expect(resetSpy).toHaveBeenCalledOnce();
+    expect(resetSpy).toHaveBeenCalledWith("project-500");
+  });
+
+  it("replaceLayer：旧图层不存在时抛出", () => {
+    const container = { clientWidth: 800, clientHeight: 600 } as HTMLElement;
+    const engine = new Engine({
+      crs: new CGCS2000GKCRS(38),
+      container,
+      tileLoadFn: async () => null,
+    });
+
+    expect(() => engine.replaceLayer("nope", makeFakeLayer("L2"))).toThrow(
+      /not found/,
+    );
   });
 });

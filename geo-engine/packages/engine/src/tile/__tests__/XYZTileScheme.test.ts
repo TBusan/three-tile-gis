@@ -220,4 +220,12 @@ describe("XYZTileScheme", () => {
     expect(ne.y).toBeGreaterThan(80);
     expect(ne.y).toBeLessThan(90);
   });
+
+  it("恒等短路：targetCrs 为 3857 时 getReprojector 返回 null（几何走共享路径）", () => {
+    // wmCRS 目标：targetCrs.name === WebMercatorCRS.name === "EPSG:3857"。
+    // 3857 瓦片在目标 CRS 下是精确矩形，重投影退化为恒等 → 返回 null 让渲染器
+    // 走无重投影路径并共享 BufferGeometry（省逐顶点投影 + 每瓦片几何创建）。
+    const key = makeTileKey("xyz", "12/356/170", 12);
+    expect(scheme.getReprojector(key)).toBeNull();
+  });
 });

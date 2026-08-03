@@ -74,6 +74,17 @@ export class LRUTileCache<T extends Disposable> implements ITileCache<T> {
     }
   }
 
+  clearByPrefix(prefix: string): void {
+    if (this._map.size === 0) return;
+    const keys: string[] = [];
+    for (const key of this._map.keys()) {
+      if (key.startsWith(prefix)) keys.push(key);
+    }
+    for (const key of keys) {
+      this.delete(key);
+    }
+  }
+
   clear(): void {
     for (const entry of this._map.values()) {
       if (!entry.value.disposed) {

@@ -108,4 +108,40 @@ describe("LRUTileCache", () => {
     expect(tc1.disposed).toBe(true);
     expect(tc2.disposed).toBe(true);
   });
+
+  it("clearByPrefix：只清除匹配前缀的条目并释放", () => {
+    const cache = new LRUTileCache<TileContent>();
+    const key = makeTileKey("proj", "0-0", 0);
+    const tc1 = new TileContent("c1", key, "L1");
+    const tc2 = new TileContent("c2", key, "L2");
+    const tc3 = new TileContent("c3", key, "L3");
+
+    cache.set("xyz:0-0", tc1, 100);
+    cache.set("proj:0-0", tc2, 100);
+    cache.set("xyz:1-0", tc3, 100);
+
+    cache.clearByPrefix("xyz:");
+
+    expect(cache.has("xyz:0-0")).toBe(false);
+    expect(cache.has("xyz:1-0")).toBe(false);
+    expect(cache.has("proj:0-0")).toBe(true);
+    expect(tc1.disposed).toBe(true);
+    expect(tc3.disposed).toBe(true);
+    expect(tc2.disposed).toBe(false);
+    expect(cache.count).toBe(1);
+    expect(cache.byteSize).toBe(100);
+  });
+
+  it("clearByPrefix：无匹配前缀时不变", () => {
+    const cache = new LRUTileCache<TileContent>();
+    const key = makeTileKey("proj", "0-0", 0);
+    const tc1 = new TileContent("c1", key, "L1");
+
+    cache.set("proj:0-0", tc1, 100);
+    cache.clearByPrefix("xyz:");
+
+    expect(cache.has("proj:0-0")).toBe(true);
+    expect(cache.count).toBe(1);
+    expect(tc1.disposed).toBe(false);
+  });
 });

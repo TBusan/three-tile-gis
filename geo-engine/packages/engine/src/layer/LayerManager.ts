@@ -32,6 +32,15 @@ export class LayerManager {
       throw new Error(`Group "${group.id}" already exists`);
     }
     this._groups.push(group);
+    // 与 addLayerToGroup 保持一致：同步 _layerIndex。
+    // 否则 getLayer/moveUp/moveDown/moveToGroup 对组内图层全部失效
+    //（removeGroup 会清理索引，addGroup 不建立索引 → 索引与组内容不对称）。
+    for (const layer of group.layers) {
+      if (this._layerIndex.has(layer.id)) {
+        throw new Error(`Layer "${layer.id}" already exists`);
+      }
+      this._layerIndex.set(layer.id, layer);
+    }
   }
 
   removeGroup(groupId: string): void {
