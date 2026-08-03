@@ -58,6 +58,9 @@ export class SubdividedPlane implements IQualityTier {
    *   使几何体跟随投影后的弯曲边界，GPU 在顶点间插值纹理，消除扭曲。
    *   不提供时，顶点在 bounds 内线性插值（适用于 ProjectTileScheme 矩形瓦片）。
    * @param level — 可选瓦片缩放级别。自适应模式（adaptive=true）下据此选择网格密度。
+   * @param bleedUV — 可选边缘出血（归一化 UV 单位）。>0 时每轴取值扩展为
+   *   `[-b, 0, 1/N, …, 1, 1+b]`，位置用 reprojector 正确外延（3857 恒等 / CRS 曲线），
+   *   出血条带 UV 钳制在 [0,1]（clampToEdge 采样边缘纹素）。消除相邻瓦片子像素接缝。
    * @returns 索引化的 BufferGeometry，含 position 和 uv 属性
    */
   createGeometry(
@@ -65,6 +68,7 @@ export class SubdividedPlane implements IQualityTier {
     origin: CrsCoord,
     reprojector?: (u: number, v: number) => { x: number; y: number },
     level?: number,
+    bleedUV?: number,
   ): THREE.BufferGeometry {
     // 自适应模式：根据 zoom 级别选择网格密度；否则用构造时的固定 gridSize。
     const N =
@@ -75,29 +79,38 @@ export class SubdividedPlane implements IQualityTier {
     const dx = (xmax - xmin) / N;
     const dy = (ymax - ymin) / N;
 
-    const vertexCount = (N + 1) * (N + 1);
+    // 边缘出血：每轴取值 [-b, 0, 1/N, …, 1, 1+b]（N+3 个），UV 钳制在 [0,1]
+    const b = Math.max(0, bleedUV ?? 0);
+    const axis: number[] = [];
+    if (b > 0) axis.push(-b);
+    for (let i = 0; i <= N; i++) axis.push(i / N);
+    if (b > 0) axis.push(1 + b);
+    const gridW = axis.length;
+    const clamp01 = (t: number) => Math.min(1, Math.max(0, t));
+
+    const vertexCount = gridW * gridW;
     const positions = new Float32Array(vertexCount * 3);
     const uvs = new Float32Array(vertexCount * 2);
 
     // Generate vertices in row-major order
-    for (let row = 0; row <= N; row++) {
-      for (let col = 0; col <= N; col++) {
-        const idx = row * (N + 1) + col;
-        const u = col / N;
-        const v = row / N;
+    for (let row = 0; row < gridW; row++) {
+      for (let col = 0; col < gridW; col++) {
+        const idx = row * gridW + col;
+        const u = axis[col];
+        const v = axis[row];
 
         let crsX: number;
         let crsY: number;
 
         if (reprojector) {
-          // 逐顶点重投影：归一化坐标 → CRS 精确位置
+          // 逐顶点重投影：归一化坐标 → CRS 精确位置（出血顶点同路径外延）
           const pt = reprojector(u, v);
           crsX = pt.x;
           crsY = pt.y;
         } else {
           // 线性插值（CRS 矩形瓦片）
-          crsX = xmin + col * dx;
-          crsY = ymin + row * dy;
+          crsX = xmin + u * (xmax - xmin);
+          crsY = ymin + v * (ymax - ymin);
         }
 
         // Local coordinates (relative to origin)
@@ -107,24 +120,26 @@ export class SubdividedPlane implements IQualityTier {
 
         // UV coordinates (Three.js convention: origin at bottom-left)
         // v=0 对应瓦片南边界（纹理底部），v=1 对应北边界（纹理顶部）
-        uvs[idx * 2] = u;
-        uvs[idx * 2 + 1] = v;
+        // 出血条带 UV 钳制在 [0,1]，clampToEdge 采样为边缘纹素
+        uvs[idx * 2] = clamp01(u);
+        uvs[idx * 2 + 1] = clamp01(v);
       }
     }
 
-    // Build index buffer: N×N quads → 2N² triangles
+    // Build index buffer: (gridW-1)×(gridW-1) quads → 2×(gridW-1)² triangles
     // 使用 Uint32Array 而非 Uint16Array：
     // 当前 gridSize 上限 64 时顶点数 4225 未超 Uint16 范围，
     // 但 Uint32 防止未来扩展或外部调用时溢出，且现代 GPU 均支持 OES_element_index_uint。
-    const triCount = N * N * 2;
+    const seg = gridW - 1;
+    const triCount = seg * seg * 2;
     const indices = new Uint32Array(triCount * 3);
 
     let i = 0;
-    for (let row = 0; row < N; row++) {
-      for (let col = 0; col < N; col++) {
-        const topLeft = row * (N + 1) + col;
+    for (let row = 0; row < seg; row++) {
+      for (let col = 0; col < seg; col++) {
+        const topLeft = row * gridW + col;
         const topRight = topLeft + 1;
-        const bottomLeft = topLeft + (N + 1);
+        const bottomLeft = topLeft + gridW;
         const bottomRight = bottomLeft + 1;
 
         // Triangle 1: bottomLeft → bottomRight → topRight (CCW)

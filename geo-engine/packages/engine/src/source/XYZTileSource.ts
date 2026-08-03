@@ -30,7 +30,7 @@ export class XYZTileSource implements IDataSource<ImageBitmap> {
   readonly minZoom: number;
   readonly maxZoom: number;
 
-  /** 请求超时（毫秒），默认 15000 */
+  /** 请求超时（毫秒），默认 10000 */
   timeout: number;
 
   constructor(
@@ -45,7 +45,7 @@ export class XYZTileSource implements IDataSource<ImageBitmap> {
     this.crs = new WebMercatorCRS();
     this.minZoom = options?.minZoom ?? 0;
     this.maxZoom = options?.maxZoom ?? 18;
-    this.timeout = options?.timeout ?? 15000;
+    this.timeout = options?.timeout ?? 10000;
 
     // 全 Web Mercator 世界范围
     const R = 6378137;
@@ -62,7 +62,16 @@ export class XYZTileSource implements IDataSource<ImageBitmap> {
 
     // 合并 AbortSignal 和超时
     const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), this.timeout);
+    // 超时必须以「普通 Error」abort，而不是无参数 abort()：
+    // 无参数 abort() 让 fetch 以 AbortError 拒绝，TileManager 会把 AbortError
+    // 视为「取消」而非失败 → 持续超时的瓦片永远不会被计入 failCount/拉黑，
+    // 每帧都会重新发起一次（每次都白等 timeout 毫秒）。
+    // 用 Error 作为 abort reason 时，fetch 以该 Error 拒绝（非 AbortError），
+    // 会被计入失败并最终触发 MAX_FAIL_COUNT 拉黑。
+    const timeoutId = setTimeout(
+      () => controller.abort(new Error(`XYZTileSource timeout: ${url}`)),
+      this.timeout,
+    );
 
     // 外部 signal 触发时也 abort
     const onExternalAbort = () => controller.abort();
@@ -76,7 +85,14 @@ export class XYZTileSource implements IDataSource<ImageBitmap> {
         );
       }
       const blob = await response.blob();
-      return createImageBitmap(blob);
+      // 显式预翻转（imageOrientation: "flipY"）→ 位图第 0 行 = 南端。
+      // 原因：WebGL 的 UNPACK_FLIP_Y_WEBGL 对 ImageBitmap 源在部分浏览器会被
+      // 忽略（对 HTMLImageElement 则始终生效）。若只依赖默认 flipY=true，被忽略时
+      // 图像顶部(北)会贴到 v=0(南) 顶点 → 整块瓦片垂直翻转（文字上下颠倒、
+      // 南北相邻瓦片在共享边界处内容对不上）。
+      // 翻转烘焙进位图后，配合 RasterRenderer 的 texture.flipY=false，上传始终
+      // "原样"（位图第 0 行 → v=0 南端），不再依赖 pixelStore 是否生效。
+      return createImageBitmap(blob, { imageOrientation: "flipY" });
     } finally {
       clearTimeout(timeoutId);
       signal?.removeEventListener("abort", onExternalAbort);

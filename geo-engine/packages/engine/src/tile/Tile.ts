@@ -3,6 +3,7 @@
 import { Disposable } from "../core/Disposable";
 import type { CrsBounds, CrsCoord } from "../core/types";
 import type { TileKey } from "./TileKey";
+import type { ITileScheme } from "./ITileScheme";
 import type { TileState } from "./TileState";
 import type { TileContent } from "./TileContent";
 
@@ -28,6 +29,12 @@ export class Tile extends Disposable {
    * ProjectTileScheme 的瓦片本身就是 CRS 矩形，不需要此函数。
    */
   reprojector?: (u: number, v: number) => { x: number; y: number };
+  /**
+   * 所属 TileScheme（可选）。
+   * 由 TileManager 在创建 Tile 时写入，供 LOD 淘汰等操作
+   * 调用 scheme.getParentKey / getChildKeys（XYZ 与 Project 统一语义）。
+   */
+  scheme?: ITileScheme;
   /** 当前生命周期状态 */
   state: TileState;
   /** 各 Layer 创建的内容列表 */

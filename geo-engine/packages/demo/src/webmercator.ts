@@ -3,7 +3,7 @@
  *
  * 演示：
  *   1. EPSG:3857 Web Mercator 坐标系（XYZ 底图原生投影，无重投影变形）
- *   2. ArcGis World_Imagery 卫星影像底图
+ *   2. OSM 街图底图（矢量渲染、无影像拼接缝）
  *   3. 矢量叠加：点（兴趣点）、线（道路）、面（建筑物）
  *   4. 透视相机 + OrbitControls（GIS 约束）
  *   5. 自适应细分网格 + 对数深度缓冲
@@ -295,11 +295,14 @@ async function main() {
   const app = document.getElementById("app")!;
 
   // ── Three.js 渲染器 ──────────────────────────────────────────
+  // 低填充率配置：瓦片纹理仅 256px、场景为扁平地图，无需 MSAA / 对数深度缓冲。
+  // MSAA(4×) + log-depth(禁用 early-Z) + DoubleSide 叠加会把填充率推上悬崖（10-30 FPS）。
+  const MAX_PIXEL_RATIO = 1.5; // 过高 DPR 只烧填充率，画面无增益（瓦片纹理 256px）
   const renderer = new THREE.WebGLRenderer({
-    antialias: true,
-    logarithmicDepthBuffer: true,
+    antialias: false, // 关闭 MSAA（填充率 ×4 的元凶）
+    logarithmicDepthBuffer: false, // 恢复 early-Z；深度精度由 render() 中自适应 near/far 保证
   });
-  renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio, MAX_PIXEL_RATIO));
   renderer.setClearColor(0x0d1b2a);
   app.appendChild(renderer.domElement);
 
@@ -312,7 +315,7 @@ async function main() {
   // ── 相机控制器 ──────────────────────────────────────────────
   const mapController = new PerspectiveMapController({
     center: { x: center.x, y: center.y },
-    distance: 6000, // 初始高度 6km
+    distance: 6000, // 初始高度 6km（恢复默认视角；OSM 矢量底图 z14 无数据缝）
     maxPolarAngle: Math.PI / 2.2,
     fov: 60,
     near: 10,
@@ -331,11 +334,14 @@ async function main() {
   new ResizeObserver(onResize).observe(app);
   onResize();
 
-  // ── Layer 1: XYZ 底图（ArcGis 卫星影像）──────────────────────
-  // 底图与引擎同为 EPSG:3857，无重投影变形
+  // ── Layer 1: XYZ 底图（OSM 街图）──────────────────────────────
+  // 底图与引擎同为 EPSG:3857，无重投影变形。
+  // 备选底图源（均需申请 token；XYZTileSource 支持 {z}/{x}/{y}/{-y} 模板）：
+  //   天地图:  https://t{0-4}.tianditu.gov.cn/DataServer?T=img_w&x={x}&y={-y}&l={z}&tk=<token>（TMS 需 {-y} 反转）
+  //   Mapbox:  https://api.mapbox.com/styles/v1/mapbox/satellite-streets-v12/tiles/256/{z}/{x}/{y}?access_token=<token>
   const xyzScheme = new XYZTileScheme(crs, 0, 18);
   const xyzSource = new XYZTileSource(
-    "https://services.arcgisonline.com/arcgis/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+    "https://tile.openstreetmap.org/{z}/{x}/{y}.png",
     { minZoom: 0, maxZoom: 18 },
   );
   const xyzRenderer = new RasterRenderer({
@@ -345,7 +351,7 @@ async function main() {
   });
 
   const basemapLayer = new RasterLayer({
-    name: "ArcGis 卫星底图",
+    name: "OSM 街图底图",
     tileScheme: xyzScheme,
     dataSource: xyzSource,
     renderer: xyzRenderer,
@@ -408,6 +414,11 @@ async function main() {
   // ── 场景同步 ─────────────────────────────────────────────────
   const sceneTiles = new Map<string, THREE.Group>();
 
+  // 已淘汰瓦片的淡出集合：key → { group, startTime }。
+  // 淘汰时先淡出再移除，把「新旧级别瓦片硬切」变成软过渡，
+  // 缓解缩放过程中粗粒度父瓦片与细粒度子瓦片拼接处内容对不上的观感。
+  const fadeOuts = new Map<string, { group: THREE.Group; startTime: number }>();
+
   function forEachMaterial(
     group: THREE.Group,
     fn: (mat: THREE.Material) => void,
@@ -424,6 +435,16 @@ async function main() {
     });
   }
 
+  /** 从场景移除 group，但不释放其内 GPU 资源（设计文档 §15） */
+  function disposeGroup(group: THREE.Group) {
+    // 只做场景摘除。geometry/material/map 的生命周期归 TileManager 的 LRU cache：
+    // 瓦片淡出通常并未从 cache 移除（cache 按字节预算独立于 _loadedTiles），
+    // 回屏时直接复用 cache 里的 renderObject。若在这里 dispose geometry，
+    // 回屏瓦片会用已释放的 geometry 渲染；dispose 共享材质（DefaultMaterialFactory
+    // 的矢量材质被所有瓦片共用一个实例）会让其它所有瓦片立刻失效并触发全局重编译。
+    worldRoot.remove(group);
+  }
+
   function syncScene() {
     const loaded = engine.tileManager.loadedTiles;
     const origin = engine.floatingOrigin.current;
@@ -431,9 +452,67 @@ async function main() {
     // Floating Origin 偏移
     worldRoot.position.set(-origin.x, -origin.y, 0);
 
-    // 添加新 tile
+    // 添加新 tile / 补挂共享瓦片迟到的 content
     for (const [key, tile] of loaded) {
-      if (sceneTiles.has(key)) continue;
+      // 原子 LOD：祖先更粗瓦片仍上屏时隐藏本瓦片（避免区域内 z/z-1 内容混杂 =
+      // 瓦片错落的视觉根因）。祖先被淘汰后本瓦片自动恢复可见。
+      if (engine.tileManager.isTileHidden(tile)) {
+        const g = sceneTiles.get(key) ?? fadeOuts.get(key)?.group;
+        sceneTiles.delete(key);
+        fadeOuts.delete(key);
+        if (g) disposeGroup(g);
+        continue;
+      }
+      let existing = sceneTiles.get(key);
+      if (!existing && fadeOuts.has(key)) {
+        // 瓦片被淘汰后重新出现在视野内：取消淡出，恢复旧 group，
+        // 避免「淡出中的旧 group」与「新创建的 group」同时渲染造成闪动。
+        const fo = fadeOuts.get(key)!;
+        fadeOuts.delete(key);
+        forEachMaterial(fo.group, (mat) => {
+          if ((mat as any).userData?.shared) return;
+          if ("opacity" in mat) {
+            const base: number =
+              (mat as any).__baseOpacity ?? (mat as any).__targetOpacity ?? 1;
+            mat.opacity = base;
+            delete (mat as any).__fadeOutFrom;
+          }
+        });
+        sceneTiles.set(key, fo.group);
+        existing = fo.group;
+        // 恢复后重新淡入，避免瞬间弹出
+        (existing as any).__fadeStart = performance.now();
+      }
+      if (existing) {
+        // 共享瓦片：其他 layer 后到的 content 需要补挂，否则该 layer 永远缺失
+        const fading = (existing as any).__fadeStart != null;
+        for (const content of tile.contents) {
+          for (const ro of content.renderObjects) {
+            if (ro.object instanceof THREE.Object3D && ro.object.parent == null) {
+              existing.add(ro.object);
+              if (fading) {
+                // group 尚在淡入：新对象也随 group 一起淡入（避免整组重淡）。
+                // 共享材质跳过（与组创建时的淡入起点逻辑一致，不参与淡入）。
+                const obj = ro.object;
+                if (
+                  obj instanceof THREE.Mesh ||
+                  obj instanceof THREE.Line ||
+                  obj instanceof THREE.Points
+                ) {
+                  const mat = obj.material as THREE.Material;
+                  if (mat && "opacity" in mat && !(mat as any).userData?.shared) {
+                    (mat as any).__baseOpacity = mat.opacity;
+                    (mat as any).__targetOpacity = mat.opacity;
+                    mat.transparent = true;
+                    mat.opacity = 0;
+                  }
+                }
+              }
+            }
+          }
+        }
+        continue;
+      }
       if (tile.contents.length === 0) continue;
 
       const group = new THREE.Group();
@@ -454,39 +533,43 @@ async function main() {
       worldRoot.add(group);
       sceneTiles.set(key, group);
 
-      // 淡入动画
+      // 淡入动画：记录目标透明度后置 0。用「加入场景的时刻」而非 content.createdAt
+      // —— createdAt 是加载开始时刻，慢速加载的瓦片出现时淡入期早已过去，会直接"弹出"。
+      // 跳过共享材质（DefaultMaterialFactory 矢量材质被所有瓦片共用）：直接改它们
+      // 会让整层一起闪动；纯矢量瓦片整组直接满透明度出现，不走淡入。
+      let fadeable = false;
       forEachMaterial(group, (mat) => {
+        if ((mat as any).userData?.shared) return;
+        fadeable = true;
+        (mat as any).__baseOpacity = mat.opacity; // 持久记录目标透明度（恢复/淡出用）
         (mat as any).__targetOpacity = mat.opacity;
         mat.transparent = true;
         mat.opacity = 0;
       });
-      (group as any).__fadeContent = tile.contents[0];
+      if (fadeable) (group as any).__fadeStart = performance.now();
     }
 
-    // 移除淘汰的 tile（释放 GPU 资源）
+    // 移除淘汰的 tile：先淡出再移除（软过渡，避免新旧级别瓦片硬切）。
+    // 纯矢量瓦片（全部共享材质）无可淡出材质 → 立即移除。共享材质无法单独淡出
+    // （淡出它们会让整层闪动），屏幕边缘的矢量瓦片瞬时消失观感可接受。
     for (const [key, group] of sceneTiles) {
       if (!loaded.has(key)) {
-        group.traverse((child) => {
-          if (
-            child instanceof THREE.Mesh ||
-            child instanceof THREE.Line ||
-            child instanceof THREE.Points
-          ) {
-            child.geometry?.dispose();
-            const mat = child.material as THREE.Material | THREE.Material[];
-            if (Array.isArray(mat)) {
-              for (const m of mat) {
-                if ("map" in m && (m as any).map) (m as any).map.dispose();
-                m.dispose();
-              }
-            } else if (mat) {
-              if ("map" in mat && (mat as any).map) (mat as any).map.dispose();
-              mat.dispose();
-            }
+        sceneTiles.delete(key);
+        // 记录每个材质的当前透明度作为淡出起点
+        let fadeable = false;
+        forEachMaterial(group, (mat) => {
+          if ((mat as any).userData?.shared) return;
+          if ("opacity" in mat) {
+            fadeable = true;
+            (mat as any).__fadeOutFrom = mat.opacity;
+            mat.transparent = true;
           }
         });
-        worldRoot.remove(group);
-        sceneTiles.delete(key);
+        if (fadeable) {
+          fadeOuts.set(key, { group, startTime: performance.now() });
+        } else {
+          disposeGroup(group);
+        }
       }
     }
   }
@@ -523,27 +606,76 @@ async function main() {
     camera.position.x += origin.x;
     camera.position.y += origin.y;
 
+    // 标准深度缓冲的自适应 near/far：near 随相机距离放大、far 随距离收窄，
+    // 保证任意缩放级别下 z-buffer 不塌缩（替代对数深度缓冲）。
+    // 需在相机位置从浮动原点偏移恢复后计算，距离才与 target 同坐标系。
+    const camDist = camera.position.distanceTo(mapController.controls.target);
+    const near = Math.min(Math.max(camDist / 5000, 10), 1e5);
+    const far = Math.min(Math.max(camDist * 100, 5e5), 1e8);
+    if (near !== camera.near || far !== camera.far) {
+      camera.near = near;
+      camera.far = far;
+      camera.updateProjectionMatrix();
+    }
+
     // 淡入动画 (300ms)
     const FADE_DURATION = 300;
+    const FADE_OUT_DURATION = 400;
     const now = performance.now();
     for (const [, group] of sceneTiles) {
-      const content = (group as any).__fadeContent;
-      if (!content) continue;
-      const elapsed = now - content.createdAt;
+      const start: number | undefined = (group as any).__fadeStart;
+      if (start == null) continue;
+      const elapsed = now - start;
       const done = elapsed >= FADE_DURATION;
       const progress = done ? 1 : Math.min(1, elapsed / FADE_DURATION);
 
       forEachMaterial(group, (mat) => {
-        const target: number = (mat as any).__targetOpacity ?? 1;
-        mat.opacity = target * progress;
+        if ((mat as any).userData?.shared) return;
+        const base: number =
+          (mat as any).__baseOpacity ?? (mat as any).__targetOpacity ?? 1;
+        mat.opacity = base * progress;
         if (done) {
-          mat.opacity = target;
-          mat.transparent = target < 1;
+          mat.opacity = base;
+          mat.transparent = base < 1;
           delete (mat as any).__targetOpacity;
         }
       });
 
-      if (done) delete (group as any).__fadeContent;
+      if (done) delete (group as any).__fadeStart;
+    }
+
+    // ── Fade-out animation (被淘汰的旧级别瓦片) ──────────────
+    // 旧瓦片被淘汰时淡出再移除：粗粒度父瓦片淡出的同时细粒度子瓦片已淡入，
+    // 让「路→田」的硬切变成一段平滑过渡，而不是瞬间替换。
+    for (const [key, fo] of fadeOuts) {
+      const elapsed = now - fo.startTime;
+      const done = elapsed >= FADE_OUT_DURATION;
+      const progress = done ? 1 : Math.min(1, elapsed / FADE_OUT_DURATION);
+
+      forEachMaterial(fo.group, (mat) => {
+        if ((mat as any).userData?.shared) return;
+        if (!("opacity" in mat)) return;
+        if (done) {
+          // 淡出完成：必须恢复透明度，不能停在 0。
+          // 材质可能是共享的（DefaultMaterialFactory 的矢量材质被所有瓦片共用），
+          // 或该瓦片仍留在 LRU cache 中（淡出时瓦片通常未从 cache 移除）。
+          // 停在 0 会让「共享同一材质的其它瓦片」以及「从 cache 回屏的瓦片」
+          // 永久不可见且无法通过淡入恢复（淡入捕获到的 __baseOpacity 也是 0）。
+          const base: number = (mat as any).__baseOpacity ?? 1;
+          mat.opacity = base;
+          mat.transparent = base < 1;
+          delete (mat as any).__fadeOutFrom;
+        } else {
+          const from: number = (mat as any).__fadeOutFrom ?? 1;
+          mat.transparent = true;
+          mat.opacity = from * (1 - progress);
+        }
+      });
+
+      if (done) {
+        disposeGroup(fo.group);
+        fadeOuts.delete(key);
+      }
     }
 
     // HUD

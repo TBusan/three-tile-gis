@@ -93,10 +93,10 @@ export class WorkerPool {
       return Promise.reject(new Error("WorkerPool已disposed"));
     }
 
-    const scriptKey = typeof task.script === "string" ? task.script : task.script.href;
+    const scriptKey = this._scriptKey(task);
 
     return new Promise<T>((resolve, reject) => {
-      // 1. 查找同 script 的空闲 Worker
+      // 1. 查找同 script 的空闲 Worker（按 script 复用）
       const idle = this._workers.find(
         (pw) => !pw.busy && pw.script === scriptKey,
       );
@@ -113,7 +113,15 @@ export class WorkerPool {
         return;
       }
 
-      // 3. 池满 → 排队
+      // 3. 池满但有空闲异 script Worker → 替换后派发（防止跨 script 任务饥饿）
+      const idleAny = this._workers.find((pw) => !pw.busy);
+      if (idleAny) {
+        const pw = this._replaceIdleWorker(idleAny, scriptKey);
+        this._dispatch(pw, task, resolve as (v: unknown) => void, reject);
+        return;
+      }
+
+      // 4. 池满且全部忙碌 → 排队
       this._queue.push({ task, resolve: resolve as (v: unknown) => void, reject });
     });
   }
@@ -140,6 +148,22 @@ export class WorkerPool {
   private _createWorker(scriptKey: string): PoolWorker {
     const worker = new Worker(scriptKey, { type: "module" });
     return { worker, script: scriptKey, busy: false };
+  }
+
+  private _scriptKey(task: WorkerTask): string {
+    return typeof task.script === "string" ? task.script : task.script.href;
+  }
+
+  /** 终止旧空闲 Worker，用指定 script 的新 Worker 顶替 */
+  private _replaceIdleWorker(old: PoolWorker, scriptKey: string): PoolWorker {
+    const idx = this._workers.indexOf(old);
+    if (idx !== -1) {
+      this._workers.splice(idx, 1);
+    }
+    old.worker.terminate();
+    const pw = this._createWorker(scriptKey);
+    this._workers.push(pw);
+    return pw;
   }
 
   private _dispatch(
@@ -199,13 +223,10 @@ export class WorkerPool {
   private _processQueue(): void {
     if (this._queue.length === 0) return;
 
-    // Find a task whose script matches an idle worker
+    // 1. 优先匹配同 script 的空闲 Worker（按 script 复用）
     for (let i = 0; i < this._queue.length; i++) {
       const pending = this._queue[i];
-      const scriptKey =
-        typeof pending.task.script === "string"
-          ? pending.task.script
-          : pending.task.script.href;
+      const scriptKey = this._scriptKey(pending.task);
 
       const idle = this._workers.find(
         (pw) => !pw.busy && pw.script === scriptKey,
@@ -217,16 +238,29 @@ export class WorkerPool {
       }
     }
 
-    // No matching idle worker — try creating a new worker if pool not full
-    if (this._workers.length < this.poolSize && this._queue.length > 0) {
+    // 2. 池未满 → 新建 Worker 派发首个排队任务
+    if (this._workers.length < this.poolSize) {
       const pending = this._queue.shift()!;
-      const scriptKey =
-        typeof pending.task.script === "string"
-          ? pending.task.script
-          : pending.task.script.href;
+      const scriptKey = this._scriptKey(pending.task);
       const pw = this._createWorker(scriptKey);
       this._workers.push(pw);
       this._dispatch(pw, pending.task, pending.resolve, pending.reject);
+      return;
+    }
+
+    // 3. 池满但有空闲异 script Worker → 替换后派发（防止跨 script 任务饥饿）
+    const idleAny = this._workers.find((pw) => !pw.busy);
+    if (idleAny) {
+      // 先替换成功再出队：若 new Worker() 抛异常（非法 script URL），
+      // 任务仍留在队列（而不是已 shift 导致 Promise 永不 settle 的悬挂）。
+      const scriptKey = this._scriptKey(this._queue[0].task);
+      try {
+        const pw = this._replaceIdleWorker(idleAny, scriptKey);
+        const pending = this._queue.shift()!;
+        this._dispatch(pw, pending.task, pending.resolve, pending.reject);
+      } catch {
+        // 替换失败：旧 worker 已 terminate，池子有空位，任务留待下次 _processQueue
+      }
     }
   }
 }

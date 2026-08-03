@@ -1,6 +1,6 @@
 // geo-engine/packages/engine/src/crs/CustomCRS.ts
 
-import { IProjectCRS } from "./IProjectCRS";
+import type { IProjectCRS } from "./IProjectCRS";
 
 /**
  * CustomCRS — 用户自定义投影

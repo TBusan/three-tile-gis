@@ -164,15 +164,19 @@ export class SkirtedMesh implements IQualityTier {
         const bB = baseIdx + s + 1;                   // skirt bottom at segment end
 
         // Quad: gA → gB → bB → bA → gA
-        // Triangle 1: gA → gB → bB (CCW looking from outside)
+        // 裙边三角朝向必须朝外。原顺序 gA→gB→bB 计算出的法线指向瓦片中心
+        //（以底边为例法线为 +Y，而朝外应为 -Y），单面材质下裙边从外侧完全不可见，
+        // 起不到遮挡 LOD 裂缝的作用。交换后四条边法线均朝外：
+        //   底边 -Y / 右边 +X / 顶边 +Y / 左边 -X
+        // Triangle 1: gA → bB → gB
         indices[i++] = gA;
+        indices[i++] = bB;
         indices[i++] = gB;
-        indices[i++] = bB;
 
-        // Triangle 2: gA → bB → bA
+        // Triangle 2: gA → bA → bB
         indices[i++] = gA;
-        indices[i++] = bB;
         indices[i++] = bA;
+        indices[i++] = bB;
       }
     }
 

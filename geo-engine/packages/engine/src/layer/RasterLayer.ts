@@ -45,8 +45,6 @@ export class RasterLayer implements ILayer {
   readonly renderer: ILayerRenderer;
   readonly dependsOn: ILayer[];
 
-  private _idCounter = 0;
-
   constructor(options: RasterLayerOptions) {
     this.id = options.id ?? `raster-${++RasterLayer._nextId}`;
     this.name = options.name;

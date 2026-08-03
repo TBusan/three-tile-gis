@@ -41,6 +41,15 @@ export class XYZTileScheme implements ITileScheme {
   /** 单次 getTilesInView 返回的最大瓦片数 — 防止极端视野下生成过多瓦片导致卡顿 */
   private static readonly MAX_TILES_PER_VIEW = 512;
 
+  /**
+   * 分辨率选级的目标瓦片屏幕尺寸（像素）。
+   *
+   * 用「米/像素 × 像素」反推目标瓦片边长，使 zoom 只随相机高度/视口变化，
+   * 不随俯仰角（tilt）变化 —— 见 _pickZoom 注释。
+   * 取值 400 ≈ 旧 viewWidth 法在 1600px 宽视口下的等效密度（横向约 4 个 tile）。
+   */
+  private static readonly TILE_TARGET_PX = 400;
+
   /** 稳定的 zoom 级别（带迟滞，防止边界振荡） */
   private _stableZoom: number | null = null;
 
@@ -115,8 +124,21 @@ export class XYZTileScheme implements ITileScheme {
     }
 
     // 4. 确定 zoom 级别
-    const viewWidth = maxX - minX;
-    const z = this._pickZoom(viewWidth);
+    const viewWidth = maxX - minX; // 3857 空间中的视野宽度（米）
+    // 将分辨率（目标 CRS 单位/像素）统一换算为「米/像素」再选级：
+    //   metersPerUnit = 视野在 3857 空间的宽度(米) / 视野在目标 CRS 空间的宽度(单位)
+    // 对米制 CRS（3857/CGCS2000/UTM）≈ 1 → 行为不变；
+    // 对经纬度 CRS（EPSG:4326，单位=度）≈ 111320×cos(lat) → 修正单位错配：
+    // 若直接把「度/像素」与米制 WORLD_SIZE 相除，targetZ 会被顶到 maxZoom（永远满级）。
+    // 分辨率本身是「俯仰无关」的稳定度量（见 PerspectiveMapController.resolution），
+    // 纯倾斜不会改变分辨率 → 级别不会随俯仰角跳变（旧实现用视野包围盒宽度 viewWidth，
+    // 俯仰扩展后宽度变化 → 级别随俯仰跳变 = 请求瓦片时「等级错乱」）。
+    const viewWidthUnits = Math.max(x1 - x0, 1e-9);
+    const resMeters =
+      _resolution != null && _resolution > 0
+        ? _resolution * (viewWidth / viewWidthUnits)
+        : _resolution;
+    const z = this._pickZoom(resMeters, viewWidth);
 
     // 5. 计算 x/y 范围
     const { WORLD_HALF, WORLD_SIZE } = XYZTileScheme;
@@ -259,15 +281,32 @@ export class XYZTileScheme implements ITileScheme {
   // ---- private ----
 
   /**
-   * 根据视野宽度选择合适的 zoom 级别
+   * 根据分辨率（或兜底的视野宽度）选择合适的 zoom 级别
    *
-   * 目标：让视野横向约显示 4 个 tile
+   * 主路径（resolution 可用）：
+   *   目标让每个 tile 在屏幕上约占 TILE_TARGET_PX 像素：
+   *     tileSize ≈ resolution × TILE_TARGET_PX
+   *     targetZ = log2(WORLD_SIZE / tileSize)
+   *   分辨率是俯仰无关的稳定度量 → 纯倾斜（相同距离/视口）不会触发级别切换，
+   *   消除请求瓦片时的「等级错乱」与由此引发的整片重请求/占位注入抖动。
+   *
+   * 兜底路径（无 resolution，如旧测试直接调用）：
+   *   用视野包围盒宽度，让视野横向约显示 4 个 tile（与旧实现一致）。
    */
-  private _pickZoom(viewWidth: number): number {
-    if (viewWidth <= 0) return this.maxZoom;
-
+  private _pickZoom(
+    resolution: number | undefined,
+    viewWidth: number,
+  ): number {
     const { WORLD_SIZE } = XYZTileScheme;
-    const targetZ = Math.log2((4 * WORLD_SIZE) / viewWidth);
+
+    let targetZ: number;
+    if (resolution != null && resolution > 0) {
+      const tileSize = resolution * XYZTileScheme.TILE_TARGET_PX;
+      targetZ = Math.log2(WORLD_SIZE / tileSize);
+    } else {
+      if (viewWidth <= 0) return this.maxZoom;
+      targetZ = Math.log2((4 * WORLD_SIZE) / viewWidth);
+    }
     const idealZ = Math.round(targetZ);
 
     // 迟滞（hysteresis）：防止 zoom 在相邻级别间反复振荡

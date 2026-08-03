@@ -282,4 +282,56 @@ describe("VectorRenderer", () => {
     renderer.disposeContent(content);
     expect(content.renderObjects[0].disposed).toBe(true);
   });
+
+  it("should set renderOrder 1000 on rendered objects by default", async () => {
+    const tile = makeTile();
+    const feature = pointFeature(10, 20);
+
+    const content = await renderer.createContent([feature], tile);
+    const obj = content.renderObjects[0].object as THREE.Points;
+    expect(obj.renderOrder).toBe(1000);
+  });
+
+  it("should respect custom renderOrder option", async () => {
+    const r = new VectorRenderer(factory, "custom-order", { renderOrder: 5 });
+    const tile = makeTile();
+    const feature = lineFeature([
+      [10, 20],
+      [30, 40],
+    ]);
+
+    const content = await r.createContent([feature], tile);
+    const obj = content.renderObjects[0].object as THREE.Line;
+    expect(obj.renderOrder).toBe(5);
+  });
+
+  it("should apply depth bias to rendered material (polygonOffset + injection)", async () => {
+    const freshFactory = new DefaultMaterialFactory();
+    const r = new VectorRenderer(freshFactory, "bias");
+    const tile = makeTile();
+    const feature = pointFeature(10, 20);
+
+    const content = await r.createContent([feature], tile);
+    const mat = (content.renderObjects[0].object as THREE.Points)
+      .material as THREE.PointsMaterial;
+
+    expect(mat.polygonOffset).toBe(true);
+    expect(mat.polygonOffsetFactor).toBe(-1);
+    expect(mat.polygonOffsetUnits).toBe(-1);
+    expect(mat.userData.__depthBiasApplied).toBe(true);
+    // 共享材质仍然标有 shared（供上层淡入淡出识别）
+    expect(mat.userData.shared).toBe(true);
+  });
+
+  it("DefaultMaterialFactory materials should be marked shared", () => {
+    const f = new DefaultMaterialFactory();
+    expect(f.createPointMaterial(pointFeature(0, 0)).userData.shared).toBe(true);
+    expect(
+      f.createLineMaterial(lineFeature([[0, 0], [1, 1]])).userData.shared,
+    ).toBe(true);
+    expect(
+      f.createFillMaterial(polygonFeature([[[0, 0], [1, 0], [1, 1], [0, 0]]]))
+        .userData.shared,
+    ).toBe(true);
+  });
 });

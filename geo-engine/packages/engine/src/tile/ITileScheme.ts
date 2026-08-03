@@ -13,6 +13,9 @@ import type { TileKey } from "./TileKey";
 export interface ITileScheme {
   readonly name: string;
 
+  /** Scheme 唯一标识 — 用于 TileKey 命名空间（XYZ 为 "xyz"，Project 为 "project-<size>"） */
+  readonly schemeId: string;
+
   /**
    * 给定 CRS 视野范围，返回所有可见的 TileKey
    *
@@ -56,4 +59,13 @@ export interface ITileScheme {
   getReprojector?(
     key: TileKey,
   ): ((u: number, v: number) => { x: number; y: number }) | null;
+
+  /**
+   * 当前稳定的 tile 级别（可选）。
+   *
+   * XYZTileScheme 返回当前稳定 zoom；ProjectTileScheme 返回当前稳定 level。
+   * TileManager 用它检测级别切换并触发 LOD 淘汰；
+   * 未实现（或尚无稳定级别）时视为不支持级别切换。
+   */
+  readonly currentZoom?: number | null;
 }

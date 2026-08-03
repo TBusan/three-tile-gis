@@ -341,4 +341,109 @@ describe("WorkerPool", () => {
     expect(pool.poolSize).toBe(3);
     pool.dispose();
   });
+
+  it("should not starve a queued task with a different script when pool is full", async () => {
+    const pool = new WorkerPool(2);
+
+    // Fill the pool with script-A workers
+    const pA1 = pool.exec<string>({ script: "/a.js", data: { n: 1 } });
+    const pA2 = pool.exec<string>({ script: "/a.js", data: { n: 2 } });
+    expect(workerMocks.length).toBe(2);
+
+    // A script-B task is queued while all A workers are busy
+    const pB = pool.exec<string>({ script: "/b.js", data: { n: 1 } });
+    expect(pool.queueLength).toBe(1);
+
+    // A-worker 0 finishes → the freed slot must be repurposed for script B
+    workerMocks[0]._emitMessage({ data: "a1" });
+    await pA1;
+
+    // The queued B task must be dispatched now, not starved
+    expect(pool.queueLength).toBe(0);
+    expect(pool.activeCount).toBe(2);
+
+    // A B-script worker should now exist
+    const bWorker = workerMocks.find((w) => w.scriptKey === "/b.js");
+    expect(bWorker).toBeDefined();
+    // The replaced A worker should have been terminated
+    expect(workerMocks[0].terminate).toHaveBeenCalled();
+
+    bWorker!._emitMessage({ data: "b1" });
+    expect(await pB).toBe("b1");
+
+    // The still-running A task (pA2) is unaffected — its worker was NOT replaced
+    expect(pool.queueLength).toBe(0);
+    const aliveA = workerMocks.find(
+      (w) => w.scriptKey === "/a.js" && w.terminate.mock.calls.length === 0,
+    );
+    expect(aliveA).toBeDefined();
+    aliveA!._emitMessage({ data: "a2" });
+    expect(await pA2).toBe("a2");
+
+    pool.dispose();
+  });
+
+  it("should dispatch a different-script task by replacing an idle worker", async () => {
+    const pool = new WorkerPool(1);
+
+    // Script-A task runs and finishes → sole worker is now idle
+    const pA = pool.exec<string>({ script: "/a.js", data: { n: 1 } });
+    workerMocks[0]._emitMessage({ data: "a" });
+    await pA;
+
+    // A script-B task arrives while the pool is full but has an idle worker
+    const pB = pool.exec<string>({ script: "/b.js", data: { n: 1 } });
+
+    // Must NOT queue — the idle A worker is replaced by a B worker
+    expect(pool.queueLength).toBe(0);
+    expect(workerMocks.length).toBe(2); // A terminated + B created
+    expect(workerMocks[1].scriptKey).toBe("/b.js");
+    expect(workerMocks[0].terminate).toHaveBeenCalled();
+
+    workerMocks[1]._emitMessage({ data: "b" });
+    expect(await pB).toBe("b");
+
+    pool.dispose();
+  });
+
+  it("should not lose a queued task when worker replacement fails", async () => {
+    const pool = new WorkerPool(2);
+
+    // 让 /b.js 的 Worker 构造抛异常（模拟非法 script URL），其余脚本正常
+    vi.stubGlobal(
+      "Worker",
+      vi.fn((script: string) => {
+        if (script === "/b.js") throw new Error("bad worker script");
+        return createWorkerMock(script);
+      }),
+    );
+
+    // 池子被 script-A worker 占满
+    const pA1 = pool.exec<string>({ script: "/a.js", data: { n: 1 } });
+    const pA2 = pool.exec<string>({ script: "/a.js", data: { n: 2 } });
+    expect(workerMocks.length).toBe(2);
+
+    // script-B 任务排队（无空闲 B worker，池满）
+    const pB = pool.exec<string>({ script: "/b.js", data: { n: 1 } });
+    expect(pool.queueLength).toBe(1);
+
+    // A-worker 0 完成 → _processQueue 尝试用 B worker 替换空闲的 A worker，
+    // 但 new Worker("/b.js") 抛异常 → 排队任务必须仍然留在队列（不能丢失）
+    workerMocks[0]._emitMessage({ data: "a1" });
+    await pA1;
+    expect(pool.queueLength).toBe(1); // 任务仍在队列，未被吞掉
+
+    // 仍在运行的 A 任务（pA2）的 worker 未被替换 → 在 dispose 前记录它
+    const aliveA = workerMocks.find(
+      (w) => w.scriptKey === "/a.js" && w.terminate.mock.calls.length === 0,
+    );
+    expect(aliveA).toBeDefined();
+
+    // dispose → 排队任务正常拒绝（不会因任务丢失而永久挂起）
+    pool.dispose();
+    await expect(pB).rejects.toThrow("WorkerPool disposed");
+
+    aliveA!._emitMessage({ data: "a2" });
+    await pA2;
+  });
 });

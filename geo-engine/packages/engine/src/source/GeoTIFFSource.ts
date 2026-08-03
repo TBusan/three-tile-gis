@@ -93,8 +93,10 @@ export class GeoTIFFSource implements IDataSource<ImageBitmap> {
     }
 
     // Direct mode (default)
-    const tiff = await this._load(signal);
+    const tiff = await this._load();
+    this._throwIfAborted(signal);
     const image = await tiff.getImage();
+    this._throwIfAborted(signal);
 
     if (this._imageWidth === 0) {
       // First load — populate metadata
@@ -117,6 +119,8 @@ export class GeoTIFFSource implements IDataSource<ImageBitmap> {
       return createImageBitmap(new ImageData(1, 1));
     }
 
+    this._throwIfAborted(signal);
+
     // Read raster data for the window
     const rasters = await image.readRasters({
       window: [window.col, window.row, window.width, window.height],
@@ -136,12 +140,32 @@ export class GeoTIFFSource implements IDataSource<ImageBitmap> {
 
   // ---- private ----
 
-  private async _load(signal?: AbortSignal): Promise<GeoTIFF> {
+  /**
+   * 共享元数据 fetch：不绑定逐瓦片 signal（与 DEMSource 一致）。
+   *
+   * 绑定首个调用方的 signal 有两个问题：
+   *   1. 该瓦片被取消 → 共享 fetch 被 abort → 缓存的 rejected promise 永久生效，
+   *      之后所有瓦片 fetch 全部失败（无法恢复）。
+   *   2. 单瓦片取消会连带中止其它所有等待同一 TIFF 的瓦片。
+   * 单个瓦片的取消通过 fetch 内各 await 点之后的 _throwIfAborted 检查处理。
+   *
+   * 失败时重置 _tiffPromise，允许下一次 fetch 重试（网络抖动不永久拉黑）。
+   */
+  private _load(): Promise<GeoTIFF> {
     if (this._tiffPromise) return this._tiffPromise;
-    this._tiffPromise = geotiffFromUrl(this._url, {
-      ...(signal ? { signal } : {}),
-    } as any);
+    this._tiffPromise = geotiffFromUrl(this._url).catch((err) => {
+      this._tiffPromise = null;
+      throw err;
+    });
     return this._tiffPromise;
+  }
+
+  private _throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      throw err;
+    }
   }
 
   /**
@@ -219,7 +243,10 @@ export class GeoTIFFSource implements IDataSource<ImageBitmap> {
       }
     }
 
-    return createImageBitmap(imageData);
+    // 与 XYZTileSource 相同的翻转约定：位图第 0 行 = 南端，
+    // 配合 RasterRenderer texture.flipY=false 原样上传（GeoTIFF 行 0 = 北端，
+    // 与 PNG 一致，故同样需要预翻转）。
+    return createImageBitmap(imageData, { imageOrientation: "flipY" });
   }
 
   /**
@@ -231,8 +258,10 @@ export class GeoTIFFSource implements IDataSource<ImageBitmap> {
   ): Promise<ImageBitmap> {
     // Load metadata on main thread first (lightweight)
     if (this._imageWidth === 0) {
-      const tiff = await this._load(signal);
+      const tiff = await this._load();
+      this._throwIfAborted(signal);
       const image = await tiff.getImage();
+      this._throwIfAborted(signal);
       this._imageWidth = image.getWidth();
       this._imageHeight = image.getHeight();
       const bbox = image.getBoundingBox();
@@ -265,11 +294,9 @@ export class GeoTIFFSource implements IDataSource<ImageBitmap> {
       },
     });
 
-    // Convert returned plain arrays back to TypedArrays and create bitmap
-    const rasters: Uint8Array[] = result.rasters.map(
-      (r) => new Uint8Array(r),
-    );
-    return this._rastersToBitmap(rasters, result.width, result.height);
+    // 直接使用 Worker 返回的 TypedArray（保留类型）。不能再 new Uint8Array(r)：
+    // 那会把 Uint16/Float32 值按 256 取模，导致高精度栅格颜色/采样完全错乱。
+    return this._rastersToBitmap(result.rasters, result.width, result.height);
   }
 
   /**

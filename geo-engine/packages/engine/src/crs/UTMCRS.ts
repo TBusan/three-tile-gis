@@ -1,6 +1,6 @@
 // geo-engine/packages/engine/src/crs/UTMCRS.ts
 
-import { IProjectCRS } from "./IProjectCRS";
+import type { IProjectCRS } from "./IProjectCRS";
 
 /**
  * UTM (Universal Transverse Mercator) 投影 — 内置公式实现

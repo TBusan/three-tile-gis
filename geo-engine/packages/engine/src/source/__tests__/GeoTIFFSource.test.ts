@@ -189,7 +189,7 @@ describe("GeoTIFFSource", () => {
     expect(closed).toBe(true);
   });
 
-  it("should pass options to fromUrl", async () => {
+  it("should call fromUrl with only the URL (shared metadata fetch is not tile-bound)", async () => {
     const { fromUrl } = await import("geotiff");
     const source = new GeoTIFFSource({ url, crs });
     const key = makeTileKey("custom", "0/0/0", 0);
@@ -198,8 +198,10 @@ describe("GeoTIFFSource", () => {
 
     await source.fetch(key, tileBounds, controller.signal);
 
-    // fromUrl should have been called with the URL
-    expect(fromUrl).toHaveBeenCalledWith(url, expect.any(Object));
+    // 共享元数据 fetch 不能绑定逐瓦片 signal：
+    // 单个瓦片取消绝不能中止所有瓦片共享的 GeoTIFF 加载。
+    // （旧逻辑把首个调用方的 signal 传给 fromUrl，一瓦取消全盘失败。）
+    expect(fromUrl).toHaveBeenCalledWith(url);
   });
 
   it("should handle single-band (grayscale) GeoTIFF", async () => {

@@ -31,11 +31,15 @@ export class LRUTileCache<T extends Disposable> implements ITileCache<T> {
   }
 
   set(key: string, value: T, byteSize: number): void {
-    // 删除已有条目
+    // 删除已有条目（覆盖时释放旧值，避免 GPU/内存资源泄漏）
     if (this._map.has(key)) {
       const old = this._map.get(key)!;
       this._totalBytes -= old.byteSize;
       this._map.delete(key);
+      // old.value !== value 守卫：防止同一对象重新 set 时把自己 dispose 掉
+      if (!old.value.disposed && old.value !== value) {
+        old.value.dispose();
+      }
     }
     this._map.set(key, { value, byteSize });
     this._totalBytes += byteSize;
@@ -50,6 +54,11 @@ export class LRUTileCache<T extends Disposable> implements ITileCache<T> {
     if (entry) {
       this._totalBytes -= entry.byteSize;
       this._map.delete(key);
+      // 与 trim()/clear()/set() 覆盖一致：删除条目时必须释放资源，
+      // 否则被 delete 的 Tile/TileContent 永远不会 dispose → GPU/内存泄漏
+      if (!entry.value.disposed) {
+        entry.value.dispose();
+      }
     }
   }
 

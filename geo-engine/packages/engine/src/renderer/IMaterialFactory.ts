@@ -32,6 +32,10 @@ export interface IMaterialFactory {
  *     lineColor: 0x00ff00,
  *     fillColor: 0x0000ff,
  *   });
+ *
+ * 三个材质在所有矢量瓦片间共享（VectorRenderer 不 dispose 材质，契约见该文件）。
+ * `userData.shared = true` 供上层（demo 淡入淡出）识别共享材质并跳过修改：
+ * 直接改 opacity/transparent 会让整个矢量层一起闪动。
  */
 export class DefaultMaterialFactory implements IMaterialFactory {
   private readonly _pointMat: THREE.PointsMaterial;
@@ -47,13 +51,18 @@ export class DefaultMaterialFactory implements IMaterialFactory {
       color: options?.pointColor ?? 0xe74c3c,
       size: 5,
       sizeAttenuation: false,
+      userData: { shared: true },
     });
     this._lineMat = new THREE.LineBasicMaterial({
       color: options?.lineColor ?? 0x2ecc71,
+      userData: { shared: true },
     });
     this._fillMat = new THREE.MeshBasicMaterial({
       color: options?.fillColor ?? 0x3498db,
-      side: THREE.DoubleSide,
+      // 地图平面只从上方观察，背面不可见；FrontSide 剔除背面，填充率减半。
+      // ShapeGeometry 默认 CCW 正面朝 +z，FrontSide 下从上方可见。
+      side: THREE.FrontSide,
+      userData: { shared: true },
     });
   }
 

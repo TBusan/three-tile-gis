@@ -9,8 +9,15 @@ import type { ICameraController } from "./ICameraController";
 export interface PerspectiveMapControllerOptions {
   /** 初始 CRS 中心（默认原点） */
   center?: { x: number; y: number };
-  /** 初始相机距地面高度（米），默认 200km */
+  /** 初始相机到 target 的直线距离（米），默认 200km */
   distance?: number;
+  /** 初始俯仰角（与垂直方向 +Z 的夹角，弧度），默认 π/4（45°） */
+  initialPolarAngle?: number;
+  /**
+   * 初始方位角（XY 平面内自 +X 逆时针，弧度），默认 -π/2（即 3π/2）。
+   * -π/2 → 相机在 target 正南 -Y，朝北俯瞰 → 屏幕上方 = 北（标准地图朝向，文字朝上）。
+   */
+  initialAzimuth?: number;
   /** 最大俯仰角（弧度），默认 π/2.2（约 82°），GIS 引擎不允许低于地平线 */
   maxPolarAngle?: number;
   /** 最小俯仰角（弧度），默认 0.15（约 8.6°），防止高海拔时完全锁死旋转 */
@@ -31,6 +38,11 @@ export interface PerspectiveMapControllerOptions {
  *   - 成熟的鼠标交互（左键平移、右键旋转、滚轮缩放）
  *   - 动态 polar angle（高空俯视、低空倾斜）
  *
+ * 约定：地面 = XY 平面，世界朝上 = +Z（camera.up）。初始视角为
+ * initialPolarAngle（默认 45°）的三维倾斜视图 —— 屏幕上方 = 远处、下方 = 近处；
+ * 方位角 initialAzimuth（默认 -π/2，相机在 target 正南）使屏幕上方 = 北（地图文字朝上）。
+ * 倾斜角度不锁死，用户可通过鼠标拖拽在 [0, maxPolarAngle] 内自由调整。
+ *
  * 对外暴露 camera 和 controls 属性，Demo 直接用于渲染。
  */
 export class PerspectiveMapController implements ICameraController {
@@ -49,6 +61,8 @@ export class PerspectiveMapController implements ICameraController {
     const {
       center = { x: 0, y: 0 },
       distance = 2e5,
+      initialPolarAngle = Math.PI / 4,
+      initialAzimuth = -Math.PI / 2,
       maxPolarAngle = Math.PI / 2.2,
       minPolarAngle = 0.15,
       fov = 60,
@@ -59,9 +73,24 @@ export class PerspectiveMapController implements ICameraController {
     this._userMaxPolar = maxPolarAngle;
     this._minPolarAngle = minPolarAngle;
 
-    // Camera：XY 平面为地面，Z 轴为高度
+    // Camera：XY 平面为地面，Z 轴为高度（世界朝上 = +Z）
     this.camera = new THREE.PerspectiveCamera(fov, 1, near, far);
-    this.camera.position.set(center.x, center.y, distance);
+    // 关键：OrbitControls 的旋转轴 = camera.up。默认 (0,1,0) 躺在地面平面内，
+    // 俯仰角从平面内轴测量 → 初始视角上下颠倒（屏幕上方反而近）。世界朝上应为 +Z。
+    this.camera.up.set(0, 0, 1);
+
+    // 初始位置：以 target 为球心、直线距离 = distance、俯仰角 = initialPolarAngle、
+    // 方位角 = initialAzimuth（默认 -π/2）。-π/2 → 相机在 target 正南 -Y，朝北俯瞰：
+    // 屏幕上方 = 远端 = 北（标准地图朝向，文字朝上）。旧实现把相机放正北 +Y，
+    // 屏幕上方变成南端 → 地图南北向反（需用户手动旋转 180° 才正常）。
+    // 必须非零俯仰角：up=+Z 时完全正俯视下 lookAt 退化（产生 90° 旋转朝向）。
+    const phi = Math.max(initialPolarAngle, 0.0001);
+    const r = distance;
+    this.camera.position.set(
+      center.x + r * Math.sin(phi) * Math.cos(initialAzimuth),
+      center.y + r * Math.sin(phi) * Math.sin(initialAzimuth),
+      r * Math.cos(phi),
+    );
     this.camera.lookAt(center.x, center.y, 0);
 
     // OrbitControls：绑定到 camera（domElement 在 attach 时设置）

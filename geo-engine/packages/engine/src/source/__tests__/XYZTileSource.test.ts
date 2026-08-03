@@ -1,5 +1,5 @@
 // geo-engine/packages/engine/src/source/__tests__/XYZTileSource.test.ts
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import { XYZTileSource } from "../XYZTileSource";
 import { makeTileKey } from "../../tile/TileKey";
 
@@ -13,7 +13,7 @@ describe("XYZTileSource", () => {
     expect(source.crs.name).toBe("EPSG:3857");
     expect(source.minZoom).toBe(0);
     expect(source.maxZoom).toBe(18);
-    expect(source.timeout).toBe(15000);
+    expect(source.timeout).toBe(10000);
   });
 
   it("should have world bounds", () => {
@@ -74,5 +74,34 @@ describe("XYZTileSource", () => {
     const mockBitmap = { close: () => { closed = true; } } as unknown as ImageBitmap;
     source.dispose(mockBitmap);
     expect(closed).toBe(true);
+  });
+
+  it("should decode with imageOrientation flipY (pre-flip for WebGL)", async () => {
+    const origFetch = globalThis.fetch;
+    const origCIB = globalThis.createImageBitmap;
+
+    (globalThis as any).fetch = vi.fn(async () => ({
+      ok: true,
+      blob: async () => new Blob(["png"]),
+    }));
+    const cibSpy = vi.fn(async () => ({
+      width: 1,
+      height: 1,
+      close: () => {},
+    }));
+    (globalThis as any).createImageBitmap = cibSpy;
+
+    try {
+      const key = makeTileKey("xyz", "1/0/0", 1);
+      await source.fetch(key, [0, 0, 1, 1] as [number, number, number, number]);
+      expect(cibSpy).toHaveBeenCalledTimes(1);
+      // 位图必须预翻转（第 0 行 = 南端），配合 RasterRenderer flipY=false
+      expect(cibSpy).toHaveBeenCalledWith(expect.anything(), {
+        imageOrientation: "flipY",
+      });
+    } finally {
+      globalThis.fetch = origFetch;
+      globalThis.createImageBitmap = origCIB;
+    }
   });
 });

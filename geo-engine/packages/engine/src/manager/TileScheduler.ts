@@ -161,6 +161,20 @@ export class TileScheduler {
     return this._queue.length;
   }
 
+  /**
+   * 判断指定 key 是否仍在队列中等待加载（已排队但尚未被 takeNext 取走）。
+   *
+   * 供 TileManager 判断占位父瓦片的子瓦片是否「未 settle」：一个子瓦片只要
+   * 还在队列中（pending）或已开始加载（_loading），就不能把父占位转背景，
+   * 否则会在子瓦片真正开始加载前过早出现空洞。
+   */
+  hasPending(strKey: string): boolean {
+    for (const req of this._queue) {
+      if (tileKeyToString(req.tileKey) === strKey) return true;
+    }
+    return false;
+  }
+
   get loadingCount(): number {
     return this._loading.size;
   }

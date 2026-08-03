@@ -50,7 +50,9 @@ export class DEMSource implements IDataSource<Float32Array> {
     tileBounds: CrsBounds,
     signal?: AbortSignal,
   ): Promise<Float32Array> {
-    const tiff = await this._load(signal);
+    this._throwIfAborted(signal);
+    const tiff = await this._load();
+    this._throwIfAborted(signal);
     const image = await tiff.getImage();
 
     if (this._imageWidth === 0) {
@@ -66,6 +68,7 @@ export class DEMSource implements IDataSource<Float32Array> {
       this.bounds = [...this._bbox] as CrsBounds;
     }
 
+    this._throwIfAborted(signal);
     const window = this._computeWindow(tileBounds);
     if (!window) {
       return new Float32Array(0); // empty — no elevation data
@@ -86,12 +89,26 @@ export class DEMSource implements IDataSource<Float32Array> {
 
   // ---- private ----
 
-  private async _load(signal?: AbortSignal): Promise<GeoTIFF> {
+  private _load(): Promise<GeoTIFF> {
     if (this._tiffPromise) return this._tiffPromise;
-    this._tiffPromise = geotiffFromUrl(this._url, {
-      ...(signal ? { signal } : {}),
-    } as any);
+    // 共享元数据 fetch：不绑定逐瓦片 signal（仅用于去重）。
+    // 首个调用方的 signal 若绑定到共享请求，会让所有瓦片共享同一个取消源；
+    // 单个瓦片取消应由 fetch 内的 _throwIfAborted 检查处理。
+    // 失败时重置 _tiffPromise：否则网络抖动/瞬时错误会缓存一个永久 rejected
+    // 的 promise，之后所有瓦片 fetch 全部失败且无法恢复。
+    this._tiffPromise = geotiffFromUrl(this._url).catch((err) => {
+      this._tiffPromise = null;
+      throw err;
+    });
     return this._tiffPromise;
+  }
+
+  private _throwIfAborted(signal?: AbortSignal): void {
+    if (signal?.aborted) {
+      const err = new Error("Aborted");
+      err.name = "AbortError";
+      throw err;
+    }
   }
 
   private _computeWindow(
@@ -131,9 +148,17 @@ export class DEMSource implements IDataSource<Float32Array> {
     _width: number,
     _height: number,
   ): Float32Array {
-    if (band instanceof Float32Array) return band;
-    const result = new Float32Array(band.length);
     const noData = this._noDataValue;
+    // 已是 Float32：无需复制；但若配置了 NoData 值仍必须屏蔽，
+    // 否则 -9999 等 NoData 值会直接泄漏成高程尖刺（原逻辑直接 return 漏掉了这一步）。
+    if (band instanceof Float32Array) {
+      if (isNaN(noData)) return band;
+      for (let i = 0; i < band.length; i++) {
+        if (band[i] === noData) band[i] = NaN;
+      }
+      return band;
+    }
+    const result = new Float32Array(band.length);
     for (let i = 0; i < band.length; i++) {
       const v = band[i];
       result[i] = isNaN(noData) ? v : (v === noData ? NaN : v);

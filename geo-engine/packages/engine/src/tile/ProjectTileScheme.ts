@@ -18,7 +18,15 @@ export class ProjectTileScheme implements ITileScheme {
   /** 第一级 tileSize（米），每级加倍 */
   readonly baseTileSize: number;
   readonly name: string;
-  private readonly schemeId: string;
+  readonly schemeId: string;
+
+  /** 上一次确认的稳定 level（带迟滞，供 TileManager 做级别切换淘汰） */
+  private _stableLevel: number | null = null;
+
+  /** 获取当前稳定的 level 级别 */
+  get currentZoom(): number | null {
+    return this._stableLevel;
+  }
 
   /**
    * @param baseTileSize — 第 0 级的 tile 边长（米）
@@ -60,9 +68,24 @@ export class ProjectTileScheme implements ITileScheme {
     if (resolution <= 0) return 0;
     const TARGET_PIXELS = 256;
     const idealTileSize = resolution * TARGET_PIXELS;
-    const level = Math.round(Math.log2(idealTileSize / this.baseTileSize));
+    const ideal = Math.log2(idealTileSize / this.baseTileSize);
+    const level = Math.round(ideal);
+
+    // 迟滞（hysteresis）：与 XYZTileScheme 一致，防止级别在相邻档位间反复振荡
+    if (this._stableLevel !== null) {
+      const diff = level - this._stableLevel;
+      if (Math.abs(diff) === 1) {
+        const boundary = this._stableLevel + diff * 0.5;
+        if (Math.abs(ideal - boundary) < 0.3) {
+          return this._stableLevel;
+        }
+      }
+    }
+
     // 上下限保护：最低 0，最高 20（防止极端分辨率下 tileSize 指数爆炸）
-    return Math.max(0, Math.min(20, level));
+    const clamped = Math.max(0, Math.min(20, level));
+    this._stableLevel = clamped;
+    return clamped;
   }
 
   getTileBounds(key: TileKey): CrsBounds {
@@ -151,6 +174,10 @@ export class ProjectTileScheme implements ITileScheme {
     // 这比裁切 extent 更好：用户不会看到视野边缘的瓦片"消失"，
     // 只是远距离时使用更粗粒度的 LOD。
     if (nCols * nRows > ProjectTileScheme.MAX_TILES_PER_LAYER) {
+      // 同步 _stableLevel：currentZoom 必须反映「实际渲染的级别」。
+      // 否则 TileManager 的 LOD 淘汰会把这些渲染中的瓦片当成旧级别，
+      // 5s 后强制删除且（视野未变化时）不重载 → 白屏。
+      this._stableLevel = level + 1;
       return this._getTilesAtLevel(extent, level + 1);
     }
 

@@ -96,7 +96,12 @@ export class GeoJSONSource implements IDataSource<GeoFeature[]> {
       }
 
       return this._features;
-    })();
+    })().catch((err) => {
+      // 失败时重置 _loadPromise：网络抖动/瞬时错误不能永久拉黑整个数据源，
+      // 否则之后所有瓦片的 fetch 全部失败且无法恢复。
+      this._loadPromise = null;
+      throw err;
+    });
 
     return this._loadPromise;
   }

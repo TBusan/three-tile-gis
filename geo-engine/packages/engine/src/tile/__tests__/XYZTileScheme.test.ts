@@ -2,7 +2,16 @@
 import { describe, it, expect } from "vitest";
 import { XYZTileScheme } from "../XYZTileScheme";
 import { WebMercatorCRS } from "../../crs/WebMercator";
+import { CustomCRS } from "../../crs/CustomCRS";
 import { makeTileKey } from "../TileKey";
+
+/** EPSG:4326 经纬度 CRS：project/unproject 恒等，单位=度 */
+function degreeCRS() {
+  return new CustomCRS("EPSG:4326", "degree", {
+    project: (lon, lat) => ({ x: lon, y: lat }),
+    unproject: (x, y) => ({ lon: x, lat: y }),
+  });
+}
 
 describe("XYZTileScheme", () => {
   // Use WebMercator as both source and target for simple testing
@@ -133,5 +142,82 @@ describe("XYZTileScheme", () => {
     const s0 = scheme.tileSizeAtZoom(0);
     const s1 = scheme.tileSizeAtZoom(1);
     expect(s1).toBeCloseTo(s0 / 2, 6);
+  });
+
+  it("zoom 稳定：相同分辨率下视野宽度不同（俯仰角变化）不跳级", () => {
+    // 旧实现用视野包围盒宽度 viewWidth 选级：宽度随俯仰角扩展 → 纯倾斜也跳级
+    //（请求瓦片时「等级错乱」）。新实现用分辨率（米/像素，俯仰无关）选级 →
+    // 相同分辨率下即使包围盒宽度相差极大，选出的 zoom 也必须一致。
+    const res = 76; // 米/像素（约 1600px 视口、6km 视高的典型值）
+    const narrow = scheme.getTilesInView([-1000, -1000, 1000, 1000], wmCRS, res);
+    const wide = scheme.getTilesInView(
+      [-400000, -1000, 400000, 1000],
+      wmCRS,
+      res,
+    );
+    expect(narrow.length).toBeGreaterThan(0);
+    expect(wide.length).toBeGreaterThan(0);
+    // 两级选出的 zoom 必须相同（分辨率相同 → 目标瓦片尺寸相同）
+    expect(wide[0].level).toBe(narrow[0].level);
+    // 且必须落在 min/max 之间
+    expect(narrow[0].level).toBeGreaterThanOrEqual(scheme.minZoom);
+    expect(narrow[0].level).toBeLessThanOrEqual(scheme.maxZoom);
+  });
+
+  it("zoom 随分辨率单调变化：分辨率越细（米/像素越小）级别越高", () => {
+    const coarse = scheme.getTilesInView([-1000, -1000, 1000, 1000], wmCRS, 400);
+    const fine = scheme.getTilesInView([-1000, -1000, 1000, 1000], wmCRS, 50);
+    // 相同视野、不同分辨率 → 分辨率越高（米/像素越小）zoom 越大
+    expect(fine[0].level).toBeGreaterThanOrEqual(coarse[0].level);
+  });
+
+  it("degree CRS：分辨率(度/像素) 应换算为米/像素后选级，而不是永远顶到 maxZoom", () => {
+    const geo = degreeCRS();
+    const geoScheme = new XYZTileScheme(geo, 0, 18);
+    // 北京附近 0.4° 视野（约 44km），分辨率 ≈ 0.00077 度/像素
+    const extent: [number, number, number, number] = [116.2, 39.7, 116.6, 40.1];
+    const tiles = geoScheme.getTilesInView(extent, geo, 0.00077);
+    expect(tiles.length).toBeGreaterThan(0);
+    // 关键：选出的 zoom 必须远小于 maxZoom。旧实现把 0.00077 度当米 →
+    // targetZ = log2(4e7 / (0.00077×400)) ≈ 27 → 钳到 18（永远满级）。
+    // 换算后 ≈ 85.7 米/像素 → targetZ ≈ 10。
+    expect(tiles[0].level).toBeLessThan(15);
+    expect(tiles[0].level).toBeGreaterThan(5);
+    // 且应落在 min/max 之间
+    expect(tiles[0].level).toBeGreaterThanOrEqual(geoScheme.minZoom);
+    expect(tiles[0].level).toBeLessThanOrEqual(geoScheme.maxZoom);
+  });
+
+  it("degree CRS：getTileBounds 返回度单位的包围盒", () => {
+    const geo = degreeCRS();
+    const geoScheme = new XYZTileScheme(geo, 0, 18);
+    // 3857 瓦片 2/1/0（东北象限顶层瓦片）
+    const key = makeTileKey("xyz", "2/1/0", 2);
+    const bounds = geoScheme.getTileBounds(key);
+    // 度单位：经度 ∈ [-180,180]，纬度 ∈ [-90,90]
+    expect(bounds[0]).toBeGreaterThanOrEqual(-180);
+    expect(bounds[0]).toBeLessThan(180);
+    expect(bounds[1]).toBeGreaterThanOrEqual(-90);
+    expect(bounds[1]).toBeLessThan(90);
+    expect(bounds[2]).toBeGreaterThan(bounds[0]);
+    expect(bounds[3]).toBeGreaterThan(bounds[1]);
+  });
+
+  it("degree CRS：getReprojector 将瓦片归一化坐标映射为度单位平面坐标", () => {
+    const geo = degreeCRS();
+    const geoScheme = new XYZTileScheme(geo, 0, 18);
+    // z=1 东北象限瓦片 1/1/0：3857 空间 x/y ∈ [0, WORLD_HALF]
+    const key = makeTileKey("xyz", "1/1/0", 1);
+    const reprojector = geoScheme.getReprojector(key)!;
+    expect(reprojector).not.toBeNull();
+    // 瓦片西南角 (u=0,v=0) 对应 3857 原点 → 经度 0°、纬度 0°
+    const sw = reprojector(0, 0);
+    expect(sw.x).toBeCloseTo(0, 3);
+    expect(sw.y).toBeCloseTo(0, 3);
+    // 瓦片东北角 (u=1,v=1) → 经度 180°、纬度 ≈85.05°（3857 上界）
+    const ne = reprojector(1, 1);
+    expect(ne.x).toBeCloseTo(180, 3);
+    expect(ne.y).toBeGreaterThan(80);
+    expect(ne.y).toBeLessThan(90);
   });
 });

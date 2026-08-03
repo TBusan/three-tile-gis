@@ -3,6 +3,7 @@
 import { Disposable } from "../core/Disposable";
 import type { TileKey } from "./TileKey";
 import type { ContentState } from "./TileState";
+import type { ILayerRenderer } from "../renderer/ILayerRenderer";
 
 /**
  * RenderObject — Three.js 对象包装
@@ -44,6 +45,8 @@ export class TileContent extends Disposable {
   state: ContentState;
   /** 创建时间戳（用于淡入动画，performance.now() 毫秒） */
   readonly createdAt: number;
+  /** 创建该 content 的渲染器（可选）— dispose 时回调其释放专属 GPU 资源（如纹理） */
+  renderer?: ILayerRenderer;
 
   constructor(id: string, tileKey: TileKey, layerId: string) {
     super();
@@ -55,6 +58,10 @@ export class TileContent extends Disposable {
   }
 
   dispose(): void {
+    if (this.disposed) return;
+    // 先让创建它的渲染器释放专属 GPU 资源（如 RasterRenderer 的纹理），
+    // 再释放 RenderObject（geometry / material）
+    this.renderer?.disposeContent(this);
     for (const ro of this.renderObjects) {
       if (!ro.disposed) ro.dispose();
     }

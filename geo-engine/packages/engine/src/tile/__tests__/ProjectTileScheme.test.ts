@@ -154,4 +154,19 @@ describe("ProjectTileScheme", () => {
     expect(xmax).toBeGreaterThanOrEqual(extent[2]);
     expect(ymax).toBeGreaterThanOrEqual(extent[3]);
   });
+
+  it("MAX_TILES_PER_LAYER 递归升 level 时 currentZoom 同步到实际渲染级别", () => {
+    // 超大视野 + 未指定分辨率（level 0）：level 0 瓦片数 > 4096 → 递归升 level。
+    // 回归测试：若 _stableLevel 不随递归更新，TileManager 会把实际渲染中的
+    // level 1 瓦片误判为「旧级别」→ 5s 后强制淘汰且不重载 → 白屏。
+    const bigExtent: CrsBounds = [0, 0, 33000, 33000];
+    const keys = scheme.getTilesInView(bigExtent, crs, 0);
+    // 实际渲染级别应为 level 1（瓦片 1000m，34×34=1156 个）
+    expect(keys.length).toBeGreaterThan(0);
+    for (const k of keys) {
+      expect(k.level).toBe(1);
+    }
+    // currentZoom 必须反映实际渲染级别
+    expect(scheme.currentZoom).toBe(1);
+  });
 });

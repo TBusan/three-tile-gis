@@ -1,6 +1,6 @@
 // geo-engine/packages/engine/src/crs/CGCS2000GK.ts
 
-import { IProjectCRS } from "./IProjectCRS";
+import type { IProjectCRS } from "./IProjectCRS";
 
 /**
  * CGCS2000 高斯-克吕格投影（3度带）

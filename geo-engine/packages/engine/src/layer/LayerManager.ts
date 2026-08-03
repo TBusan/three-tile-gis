@@ -94,11 +94,12 @@ export class LayerManager {
     const layer = this._layerIndex.get(layerId);
     if (!layer) return;
 
+    // _getAllFlat 按 zIndex 升序排序：all[idx + 1] 才是上方（更高 zIndex）的图层
     const all = this._getAllFlat();
     const idx = all.indexOf(layer);
-    if (idx > 0) {
+    if (idx < all.length - 1) {
       // 用 zIndex 交换
-      const above = all[idx - 1];
+      const above = all[idx + 1];
       const tmp = layer.zIndex;
       layer.zIndex = above.zIndex;
       above.zIndex = tmp;
@@ -110,10 +111,11 @@ export class LayerManager {
     const layer = this._layerIndex.get(layerId);
     if (!layer) return;
 
+    // _getAllFlat 按 zIndex 升序排序：all[idx - 1] 才是下方（更低 zIndex）的图层
     const all = this._getAllFlat();
     const idx = all.indexOf(layer);
-    if (idx < all.length - 1) {
-      const below = all[idx + 1];
+    if (idx > 0) {
+      const below = all[idx - 1];
       const tmp = layer.zIndex;
       layer.zIndex = below.zIndex;
       below.zIndex = tmp;
@@ -125,9 +127,16 @@ export class LayerManager {
     const layer = this._layerIndex.get(layerId);
     if (!layer) return;
 
-    // 先从原 Group 移除
+    // 必须先校验目标 Group 存在，再移除图层：
+    // 旧逻辑先 splice 再找目标，目标不存在时抛错但图层已从原 Group 移除，
+    // 造成「图层还在 _layerIndex 却不属于任何 Group」的不一致状态。
+    const targetGroup = this._groups.find((g) => g.id === targetGroupId);
+    if (!targetGroup) throw new Error(`Group "${targetGroupId}" not found`);
+    if (targetGroup.layers.includes(layer)) return;
+
+    // 从原 Group 移除
     for (const group of this._groups) {
-      const idx = group.layers.findIndex((l) => l.id === layerId);
+      const idx = group.layers.indexOf(layer);
       if (idx !== -1) {
         group.layers.splice(idx, 1);
         break;
@@ -135,8 +144,6 @@ export class LayerManager {
     }
 
     // 加入目标 Group
-    const targetGroup = this._groups.find((g) => g.id === targetGroupId);
-    if (!targetGroup) throw new Error(`Group "${targetGroupId}" not found`);
     targetGroup.layers.push(layer);
   }
 

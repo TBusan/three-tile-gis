@@ -80,6 +80,29 @@ describe("DEMSource", () => {
     expect(fromUrl).toHaveBeenCalledTimes(1);
   });
 
+  it("should not bind per-tile signal to the shared metadata fetch", async () => {
+    const { fromUrl } = await import("geotiff");
+    const source = new DEMSource({ url, crs });
+    const key = makeTileKey("custom", "0/0/0", 0);
+    const controller = new AbortController();
+
+    await source.fetch(key, [0, 0, 100, 100], controller.signal);
+
+    // 共享 fetch 只应接收 url，不携带逐瓦片 signal
+    expect(fromUrl).toHaveBeenCalledWith(url);
+  });
+
+  it("should throw AbortError when the tile signal is already aborted", async () => {
+    const source = new DEMSource({ url, crs });
+    const key = makeTileKey("custom", "0/0/0", 0);
+    const controller = new AbortController();
+    controller.abort();
+
+    await expect(
+      source.fetch(key, [0, 0, 100, 100], controller.signal),
+    ).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("should return empty Float32Array for tile outside bounds", async () => {
     const source = new DEMSource({ url, crs });
     const key = makeTileKey("custom", "0/0/0", 0);

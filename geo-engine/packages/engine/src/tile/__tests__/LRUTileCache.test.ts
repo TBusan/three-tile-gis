@@ -62,6 +62,37 @@ describe("LRUTileCache", () => {
     expect(tc2.disposed).toBe(false);
   });
 
+  it("should dispose the old value when overwriting the same key", () => {
+    const cache = new LRUTileCache<TileContent>();
+    const key = makeTileKey("proj", "0-0", 0);
+    const oldTc = new TileContent("c1", key, "L1");
+    const newTc = new TileContent("c2", key, "L2");
+
+    cache.set("proj:0-0", oldTc, 1024);
+    cache.set("proj:0-0", newTc, 2048);
+
+    expect(cache.get("proj:0-0")).toBe(newTc);
+    expect(oldTc.disposed).toBe(true); // 覆盖时释放旧值
+    expect(newTc.disposed).toBe(false);
+    expect(cache.count).toBe(1);
+    expect(cache.byteSize).toBe(2048);
+  });
+
+  it("should not dispose the value when re-setting the same object", () => {
+    const cache = new LRUTileCache<TileContent>();
+    const key = makeTileKey("proj", "0-0", 0);
+    const tc = new TileContent("c1", key, "L1");
+
+    cache.set("proj:0-0", tc, 1024);
+    cache.set("proj:0-0", tc, 2048);
+
+    // 同一对象重新 set：不能把自己 dispose 掉（否则留下 disposed 对象在缓存中）
+    expect(cache.get("proj:0-0")).toBe(tc);
+    expect(tc.disposed).toBe(false);
+    expect(cache.count).toBe(1);
+    expect(cache.byteSize).toBe(2048);
+  });
+
   it("should clear all entries", () => {
     const cache = new LRUTileCache<TileContent>();
     const key = makeTileKey("proj", "0-0", 0);

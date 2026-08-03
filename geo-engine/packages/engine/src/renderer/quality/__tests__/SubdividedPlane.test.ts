@@ -133,4 +133,57 @@ describe("SubdividedPlane", () => {
     // All normals should point up (0,0,1) for a flat plane
     expect(normal.getZ(0)).toBeCloseTo(1, 5);
   });
+
+  it("should expand vertex count by bleed to (N+3)²", () => {
+    const plane = new SubdividedPlane(2); // N=2 → 3 轴值 → 出血 5 轴值
+    const geo = plane.createGeometry(bounds, origin, undefined, undefined, 0.05);
+    const positions = geo.getAttribute("position");
+    expect(positions.count).toBe(25); // (2+3)²
+  });
+
+  it("bleed vertices should extend beyond bounds", () => {
+    const plane = new SubdividedPlane(2);
+    const b = 0.1;
+    const geo = plane.createGeometry(bounds, origin, undefined, undefined, b);
+    const pos = geo.getAttribute("position") as THREE.BufferAttribute;
+
+    // 出血后首行首列 (u=-b, v=-b) 位置应 < bounds 下界
+    expect(pos.getX(0)).toBeCloseTo(-b * 100, 5); // x = -b*width
+    expect(pos.getY(0)).toBeCloseTo(-b * 100, 5);
+    // 末行末列 (u=1+b, v=1+b) 位置应 > bounds 上界
+    const lastIdx = 5 * 5 - 1;
+    expect(pos.getX(lastIdx)).toBeCloseTo(100 + b * 100, 5);
+    expect(pos.getY(lastIdx)).toBeCloseTo(100 + b * 100, 5);
+  });
+
+  it("bleed vertices should clamp UV to [0,1]", () => {
+    const plane = new SubdividedPlane(2);
+    const geo = plane.createGeometry(bounds, origin, undefined, undefined, 0.1);
+    const uv = geo.getAttribute("uv") as THREE.BufferAttribute;
+
+    // 首行首列 (u=-b, v=-b) → UV 钳制为 (0, 0)
+    expect(uv.getX(0)).toBe(0);
+    expect(uv.getY(0)).toBe(0);
+    // 末行末列 (u=1+b, v=1+b) → UV 钳制为 (1, 1)
+    const lastIdx = 5 * 5 - 1;
+    expect(uv.getX(lastIdx)).toBe(1);
+    expect(uv.getY(lastIdx)).toBe(1);
+    // 内部顶点 (col=2,row=2) 对应 u=0.5 → UV=0.5 不受影响
+    const centerIdx = 2 * 5 + 2;
+    expect(uv.getX(centerIdx)).toBeCloseTo(0.5, 5);
+  });
+
+  it("bleed should increase triangle count to 2×(N+2)²", () => {
+    const plane = new SubdividedPlane(2);
+    const geo = plane.createGeometry(bounds, origin, undefined, undefined, 0.05);
+    // seg = gridW-1 = (N+3)-1 = N+2 = 4 → 4²×2 三角形 = 32 → 96 indices
+    expect(geo.index!.count).toBe(4 * 4 * 2 * 3);
+  });
+
+  it("bleedUV=0 or omitted should keep original vertex count", () => {
+    const plane = new SubdividedPlane(2);
+    expect(plane.createGeometry(bounds, origin, undefined, undefined, 0).getAttribute("position").count).toBe(9);
+    expect(plane.createGeometry(bounds, origin, undefined, undefined, undefined).getAttribute("position").count).toBe(9);
+    expect(plane.createGeometry(bounds, origin, undefined, undefined, -1).getAttribute("position").count).toBe(9);
+  });
 });

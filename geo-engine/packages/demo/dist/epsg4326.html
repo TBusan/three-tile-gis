@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>GeoEngine — EPSG:3857 Web Mercator + XYZ 底图 + 矢量叠加</title>
+  <title>GeoEngine — EPSG:4326 经纬度坐标系 + XYZ 底图 + 矢量叠加</title>
   <style>
     * { margin: 0; padding: 0; box-sizing: border-box; }
     html, body { width: 100%; height: 100%; overflow: hidden; }
@@ -70,13 +70,13 @@
       display: inline-block;
     }
   </style>
-  <script type="module" crossorigin src="/assets/webmercator-BhJY40vQ.js"></script>
+  <script type="module" crossorigin src="/assets/epsg4326-Jz9vl8uO.js"></script>
   <link rel="modulepreload" crossorigin href="/assets/PerspectiveMapController-DstmkKXr.js">
 </head>
 <body>
   <div id="app">
     <div id="panel">
-      <div class="title">EPSG:3857 Web Mercator + XYZ 底图</div>
+      <div class="title">EPSG:4326 经纬度坐标系 + XYZ 底图</div>
       <div>FPS: <span id="fps-value" style="color:#7CFC00;font-weight:bold">—</span> <span id="frame-time" style="color:#888;font-size:11px"></span></div>
       <div>CRS: <span id="crs-name">—</span></div>
       <div>中心: <span id="crs-pos">—</span></div>
@@ -89,6 +89,6 @@
         <div class="legend-item"><span class="legend-poly" style="background:rgba(255,165,0,0.5)"></span> 建筑 (Polygon)</div>
       </div>
     </div>
-  </div>
+  </div>
 </body>
 </html>

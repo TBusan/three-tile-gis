@@ -132,4 +132,55 @@ describe("LayerManager", () => {
     expect(mgr.groups).toHaveLength(0);
     expect(mgr.getLayer(layer.id)).toBeUndefined();
   });
+
+  it("should moveUp exchange with the layer above", () => {
+    mgr.addGroup({ id: "g1", name: "G1", visible: true, opacity: 1, layers: [] });
+    const bottom = makeLayer("bottom", 0);
+    const middle = makeLayer("middle", 5);
+    const top = makeLayer("top", 10);
+    mgr.addLayerToGroup(bottom, "g1");
+    mgr.addLayerToGroup(middle, "g1");
+    mgr.addLayerToGroup(top, "g1");
+
+    mgr.moveUp(middle.id);
+
+    // middle gains the higher zIndex (was 5, now 10); top drops to 5
+    expect(middle.zIndex).toBe(10);
+    expect(top.zIndex).toBe(5);
+    const visible = mgr.getVisibleLayers();
+    expect(visible[1].id).toBe(top.id);
+    expect(visible[2].id).toBe(middle.id);
+  });
+
+  it("should moveDown exchange with the layer below", () => {
+    mgr.addGroup({ id: "g1", name: "G1", visible: true, opacity: 1, layers: [] });
+    const bottom = makeLayer("bottom", 0);
+    const middle = makeLayer("middle", 5);
+    const top = makeLayer("top", 10);
+    mgr.addLayerToGroup(bottom, "g1");
+    mgr.addLayerToGroup(middle, "g1");
+    mgr.addLayerToGroup(top, "g1");
+
+    mgr.moveDown(middle.id);
+
+    // middle drops to the lower zIndex (was 5, now 0); bottom rises to 5
+    expect(middle.zIndex).toBe(0);
+    expect(bottom.zIndex).toBe(5);
+    const visible = mgr.getVisibleLayers();
+    expect(visible[0].id).toBe(middle.id);
+    expect(visible[1].id).toBe(bottom.id);
+  });
+
+  it("should no-op moveUp at top and moveDown at bottom", () => {
+    mgr.addGroup({ id: "g1", name: "G1", visible: true, opacity: 1, layers: [] });
+    const a = makeLayer("A", 0);
+    const b = makeLayer("B", 10);
+    mgr.addLayerToGroup(a, "g1");
+    mgr.addLayerToGroup(b, "g1");
+
+    mgr.moveUp(b.id); // already top → no-op
+    mgr.moveDown(a.id); // already bottom → no-op
+    expect(a.zIndex).toBe(0);
+    expect(b.zIndex).toBe(10);
+  });
 });

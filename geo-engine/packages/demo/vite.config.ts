@@ -15,6 +15,7 @@ export default defineConfig({
         main: path.resolve(__dirname, "index.html"),
         cgcs2000: path.resolve(__dirname, "cgcs2000.html"),
         webmercator: path.resolve(__dirname, "webmercator.html"),
+        epsg4326: path.resolve(__dirname, "epsg4326.html"),
       },
     },
   },

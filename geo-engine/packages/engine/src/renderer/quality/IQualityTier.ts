@@ -26,6 +26,9 @@ export interface IQualityTier {
    *   应逐顶点计算精确位置（设计文档 §3.5）；不提供时线性插值 bounds。
    * @param level — 可选瓦片缩放级别（XYZ zoom）。供自适应细分的质量层
    *   根据级别选择网格密度：level 越小（视野越大）→ 投影弯曲越剧烈 → 需更细网格。
+   * @param bleedUV — 可选边缘出血（归一化 UV 单位）。>0 时几何体向四边各扩展该比例，
+   *   且出血条带的 UV 钳制在 [0,1]（clampToEdge 采样边缘纹素），消除相邻瓦片子像素接缝。
+   *   结构化类型允许 DemMesh/SkirtedMesh 等实现不声明该参数（它们不需要出血）。
    * @returns BufferGeometry，所有顶点在局部坐标中
    */
   createGeometry(
@@ -33,5 +36,6 @@ export interface IQualityTier {
     origin: CrsCoord,
     reprojector?: (u: number, v: number) => { x: number; y: number },
     level?: number,
+    bleedUV?: number,
   ): THREE.BufferGeometry;
 }

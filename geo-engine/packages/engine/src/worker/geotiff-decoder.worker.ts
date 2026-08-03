@@ -21,8 +21,13 @@ export interface GeoTiffDecodeInput {
 }
 
 export interface GeoTiffDecodeOutput {
-  /** Raster data as plain number arrays (one per band) */
-  rasters: number[][];
+  /**
+   * Raster data as typed arrays (one per band).
+   * 保留原始 TypedArray 类型：structured clone 可直接传输且零拷贝，
+   * 主线程据此区分 Uint8/Uint16/Float32 并做正确的像素换算。
+   * 若转成普通 number[] 会丢失类型信息，Uint16/Float32 数据会被错误按 Uint8 取模。
+   */
+  rasters: Array<Uint8Array | Uint16Array | Int16Array | Float32Array>;
   width: number;
   height: number;
 }
@@ -34,11 +39,13 @@ self.onmessage = async (e: MessageEvent<GeoTiffDecodeInput>) => {
     const image = await tiff.getImage();
     const rasters = await image.readRasters({ window: wnd });
 
-    // Convert TypedArrays to plain number arrays for structured clone transfer
-    const plainRasters = rasters.map((r) => Array.from(r as Uint8Array | Uint16Array | Int16Array | Float32Array));
+    // 直接传输 TypedArray（structured clone 保留类型），不做 Array.from 转换
+    const typedRasters = rasters.map((r) =>
+      r as Uint8Array | Uint16Array | Int16Array | Float32Array,
+    );
 
     const output: GeoTiffDecodeOutput = {
-      rasters: plainRasters,
+      rasters: typedRasters,
       width: wnd[2],
       height: wnd[3],
     };
