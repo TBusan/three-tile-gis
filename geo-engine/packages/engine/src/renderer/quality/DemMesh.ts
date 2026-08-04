@@ -22,14 +22,14 @@ export class DemMesh implements IQualityTier {
 
   /**
    * @param getElevation — 给定 CRS 坐标 (x, y)，返回高程（米）
-   * @param gridSize — 细分密度（2–16，默认 4）
+   * @param gridSize — 细分密度（2–64，默认 4）
    */
   constructor(
     getElevation: (x: number, y: number) => number,
     gridSize: number = 4,
   ) {
     this._getElevation = getElevation;
-    this.gridSize = Math.max(2, Math.min(16, Math.floor(gridSize)));
+    this.gridSize = Math.max(2, Math.min(64, Math.floor(gridSize)));
   }
 
   createGeometry(bounds: CrsBounds, origin: CrsCoord): THREE.BufferGeometry {

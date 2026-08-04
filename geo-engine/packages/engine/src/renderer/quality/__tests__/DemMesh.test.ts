@@ -110,8 +110,9 @@ describe("DemMesh", () => {
     expect(Math.abs(nz)).toBeGreaterThan(0);
   });
 
-  it("should clamp gridSize to [2, 16]", () => {
+  it("should clamp gridSize to [2, 64]", () => {
     expect(new DemMesh(() => 0, 1).gridSize).toBe(2);
-    expect(new DemMesh(() => 0, 20).gridSize).toBe(16);
+    expect(new DemMesh(() => 0, 20).gridSize).toBe(20);
+    expect(new DemMesh(() => 0, 65).gridSize).toBe(64);
   });
 });

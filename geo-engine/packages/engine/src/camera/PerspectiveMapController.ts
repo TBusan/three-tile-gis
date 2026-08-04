@@ -134,6 +134,28 @@ export class PerspectiveMapController implements ICameraController {
   private static readonly MAX_EXTENT_HALF = 20_037_508.34;
 
   /**
+   * 近水平倾斜时远处 extent 的钳制系数（单位与 resolution 相同：3857 为米、4326 为度）。
+   *
+   * 预算推导：XYZTileScheme 单视野最多 MAX_TILES_PER_VIEW(512) 瓦片，且
+   *   tileSize(z) = resolution * TILE_TARGET_PX(400)
+   * 正方形 extent 半宽不超过
+   *   half ≤ √512 * tileSize / 2 ≈ 4525 * resolution
+   * 取 55% 裕量（多图层、非对称几何留余量）→ 2500。
+   *
+   * 该系数只用于「越过地平线」（aboveHorizon）分支：此时屏幕上方是天空，
+   * 可见地面只有 target 附近一圈，按 target ± cap 取有界范围即可。
+   * 未越过地平线但接近地平线（视线仍与地面相交、远端交点却达数百至数千公里）的
+   * 过渡区由下方 area 预算收缩处理（锚定最近角点、只砍远端），见 extent getter。
+   */
+  private static readonly HORIZON_CAP_FACTOR = 2500;
+
+  /** 与 XYZTileScheme.MAX_TILES_PER_VIEW 保持一致（本地常量避免 camera → tile 依赖） */
+  private static readonly MAX_TILES_PER_VIEW = 512;
+
+  /** 与 XYZTileScheme.TILE_TARGET_PX 保持一致 */
+  private static readonly TILE_TARGET_PX = 400;
+
+  /**
    * CRS 空间视野范围。
    *
    * 按「屏幕四角视线与地面(z=0)的交点」取 AABB（标准 footprint 算法）。
@@ -198,8 +220,35 @@ export class PerspectiveMapController implements ICameraController {
       }
     }
 
-    if (aboveHorizon) {
-      x0 = -MAX; y0 = -MAX; x1 = MAX; y1 = MAX;
+    const res = Math.max(this.resolution, 1e-9);
+    const cap = Math.min(
+      res * PerspectiveMapController.HORIZON_CAP_FACTOR,
+      MAX,
+    );
+
+    // 单一 zoom 调度下瓦片数 = (extentW × extentH) / (res × TILE_TARGET_PX)²。
+    // 预算面积：512 × (400·res)²。面积一旦超预算，getVisibleTiles 撞 512 上限后
+    // 按行优先返回任意条带（不覆盖视野）→ 调度 churn、空白 + 帧率崩塌。
+    const budgetArea =
+      PerspectiveMapController.MAX_TILES_PER_VIEW *
+      Math.pow(PerspectiveMapController.TILE_TARGET_PX * res, 2);
+    const area = (x1 - x0) * (y1 - y0);
+
+    if (aboveHorizon || area > budgetArea) {
+      // 触发条件有两种（旧实现都把 extent 钳到 ±半个地球 → 全球调度 → 帧率崩塌）：
+      //   1. aboveHorizon：相机近水平倾斜（俯仰超过 fov 半角 + 90° 阈值），屏幕上方
+      //      视线越过地平线、无地面交点，可见地面沿该方向延伸到无限远。
+      //   2. 未越过地平线但接近地平线（俯仰 ≈ 53°~60° 过渡区）：屏幕上方视线仍与地面
+      //      相交，但近水平射线的地面交点可达数百至数千公里 → 面积远超瓦片预算。
+      // 统一按「当前分辨率 × 预算系数」把远处钳到以 target 为中心的有界范围
+      // （见 HORIZON_CAP_FACTOR 注释）。以 target 为中心保证地图中心始终有瓦片
+      // （角落锚定收缩会把 target 挤出 extent → 屏幕中心空白，更糟）。
+      // 近水平视角下远处只是屏幕顶部一条低分辨率细带，截掉不损失观感；
+      // 正常浏览角度（≤~53°）面积在预算内，不触发、零裁剪。
+      x0 = target.x - cap;
+      y0 = target.y - cap;
+      x1 = target.x + cap;
+      y1 = target.y + cap;
     }
 
     return [

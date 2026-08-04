@@ -133,4 +133,51 @@ describe("PerspectiveMapController", () => {
     const ctrl = new PerspectiveMapController();
     expect(ctrl.controls.minPolarAngle).toBeCloseTo(0.15, 6);
   });
+
+  it("近水平倾斜（polar≈85°）时 extent 必须被钳制，不得爆炸为全球", () => {
+    const ctrl = new PerspectiveMapController({
+      center: { x: 0, y: 0 },
+      distance: 6000,
+      fov: 60,
+      initialPolarAngle: 85 * (Math.PI / 180), // 近水平 → 屏幕上方越过地平线
+    });
+    ctrl.update(0);
+
+    const extent = ctrl.extent;
+    for (const v of extent) expect(Number.isFinite(v)).toBe(true);
+    // 屏幕上方越过地平线（aboveHorizon）时旧实现把 extent 钳到 ±半个地球
+    // （宽度 ≈ 4e7 米）→ 调度器撞 512 瓦片上限 → 帧率崩塌。
+    // 新实现按 分辨率×HORIZON_CAP_FACTOR 钳到有界范围（此处 cap≈28.9km）。
+    expect(extent[2] - extent[0]).toBeLessThan(200_000);
+    expect(extent[3] - extent[1]).toBeLessThan(200_000);
+    // extent 仍应包含目标点（原点），且分辨率按 6000m 相机距离正常返回
+    expect(extent[0]).toBeLessThan(0);
+    expect(extent[2]).toBeGreaterThan(0);
+    expect(ctrl.resolution).toBeGreaterThan(0);
+  });
+
+  it("地平线下过渡区（polar≈58°，视线仍与地面相交）extent 按预算钳制且覆盖目标", () => {
+    const ctrl = new PerspectiveMapController({
+      center: { x: 0, y: 0 },
+      distance: 6000,
+      fov: 60,
+      initialPolarAngle: 58 * (Math.PI / 180),
+    });
+    ctrl.update(0);
+
+    const extent = ctrl.extent;
+    for (const v of extent) expect(Number.isFinite(v)).toBe(true);
+    // 58° 时四角视线仍向下（未 aboveHorizon），但近水平射线的远端地面交点
+    // 旧实现达 ~2400km → 远超单一 zoom 瓦片预算 → 调度 churn。
+    // 新实现按 分辨率×HORIZON_CAP_FACTOR 钳到以 target 为中心的有界范围。
+    // 测试环境（无容器，clientHeight=600）res = 2·tan(30°)·6000/600 ≈ 11.55 m/px，
+    // cap = 11.55×2500 ≈ 28.9km → extent 边长 ≈ 57.7km。
+    expect(extent[2] - extent[0]).toBeLessThan(200_000);
+    expect(extent[3] - extent[1]).toBeLessThan(200_000);
+    // 以 target 为中心钳制 → 地图中心（原点）必须被覆盖（角落锚定收缩会挤出 target）
+    expect(extent[0]).toBeLessThan(0);
+    expect(extent[2]).toBeGreaterThan(0);
+    expect(extent[1]).toBeLessThan(0);
+    expect(extent[3]).toBeGreaterThan(0);
+  });
 });

@@ -2,6 +2,11 @@
 export { type ILayerRenderer } from "./ILayerRenderer";
 export { RasterRenderer, type RasterRendererOptions } from "./RasterRenderer";
 export {
+  TerrainRenderer,
+  type TerrainRendererOptions,
+  type TerrainOverlayData,
+} from "./TerrainRenderer";
+export {
   VectorRenderer,
 } from "./VectorRenderer";
 export {

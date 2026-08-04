@@ -8,3 +8,8 @@ export { PointCloudSource, type PointCloudEntity } from "./PointCloudSource";
 export { GPRSource, type VoxelGrid } from "./GPRSource";
 export { GeoTIFFSource, type GeoTIFFSourceOptions } from "./GeoTIFFSource";
 export { DEMSource, type DEMSourceOptions } from "./DEMSource";
+export {
+  RGBTerrainSource,
+  type RGBTerrainSourceOptions,
+  type TerrainRgbData,
+} from "./RGBTerrainSource";

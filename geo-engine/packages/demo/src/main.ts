@@ -570,6 +570,8 @@ async function main() {
         sceneTiles.delete(key);
       }
     }
+    // render-on-demand：旧底图已摘除，新瓦片尚未加载 → 强制重绘一帧清空画面
+    needsRender = true;
     engine.replaceLayer(currentBasemap.id, next);
     currentBasemap = next;
     document.querySelectorAll("#basemap-switcher button").forEach((btn) => {
@@ -578,7 +580,8 @@ async function main() {
     });
   }
 
-  function syncScene() {
+  function syncScene(): boolean {
+    let changed = false;
     const loaded = engine.tileManager.loadedTiles;
     const origin = engine.floatingOrigin.current;
 
@@ -604,7 +607,10 @@ async function main() {
       if (engine.tileManager.isTileHidden(tile)) {
         const g = sceneTiles.get(key);
         sceneTiles.delete(key);
-        if (g) disposeGroup(g);
+        if (g) {
+          disposeGroup(g);
+          changed = true;
+        }
         continue;
       }
       const existing = sceneTiles.get(key);
@@ -618,6 +624,7 @@ async function main() {
             if (ro.object instanceof THREE.Object3D && ro.object.parent == null) {
               existing.add(ro.object);
               addedAny = true;
+              changed = true;
               if (fading) {
                 // group 尚在淡入：新对象也随 group 一起淡入（避免整组重淡）。
                 // 共享材质跳过（与组创建时的淡入起点逻辑一致，不参与淡入）。
@@ -668,6 +675,7 @@ async function main() {
 
       worldRoot.add(group);
       sceneTiles.set(key, group);
+      changed = true;
 
       // 存储该 group 包含的 layerId 列表（用于图层显隐控制）
       (group as any).__layerIds = tile.contents.map((c) => c.layerId);
@@ -679,6 +687,7 @@ async function main() {
       let replacesEvicted = false;
       const scheme = tile.scheme;
       if (scheme) {
+        // ① 缩近：本瓦片是某刚淘汰祖先的细化子瓦片（祖先被淘汰）
         let parent: TileKey | null = scheme.getParentKey(tile.key);
         while (parent) {
           if (evictedKeys.has(tileKeyToString(parent))) {
@@ -686,6 +695,18 @@ async function main() {
             break;
           }
           parent = scheme.getParentKey(parent);
+        }
+        // ② 缩远：本瓦片是刚淘汰的 4 个直接子瓦片的父瓦片（zoom-out LOD 替换）。
+        //    要求 4 个子瓦片全部本次被淘汰，避免把「平移后屏外淘汰的子瓦片」
+        //    误判为本次 LOD 替换（其父瓦片仍应按新区域淡入）。
+        if (!replacesEvicted) {
+          const children = scheme.getChildKeys(tile.key);
+          if (
+            children.length > 0 &&
+            children.every((c) => evictedKeys.has(tileKeyToString(c)))
+          ) {
+            replacesEvicted = true;
+          }
         }
       }
 
@@ -716,8 +737,11 @@ async function main() {
       if (!loaded.has(key)) {
         sceneTiles.delete(key);
         disposeGroup(group);
+        changed = true;
       }
     }
+
+    return changed;
   }
 
   // ── Render loop ────────────────────────────────────────────
@@ -728,70 +752,47 @@ async function main() {
   let fpsLastTime = performance.now();
   // syncScene 节流时间戳：结构性同步与引擎 UPDATE_INTERVAL_MS(100ms) 对齐
   let lastSyncTs = 0;
+  // 上一帧相机位置（世界坐标，未浮动原点偏移）：用于旋转/平移检测
+  let lastCamPos = { x: 0, y: 0, z: 0 };
+  // render-on-demand：dirty 标志 + 上次实际绘制时刻（空闲显示 "FPS: idle"）
+  let needsRender = true;
+  let lastRenderTs = performance.now();
 
   function render() {
-    // ── FPS 统计 ─────────────────────────────────────────
-    fpsFrames++;
-    const fpsNow = performance.now();
-    const fpsElapsed = fpsNow - fpsLastTime;
-    if (fpsElapsed >= 500) {
-      const fps = (fpsFrames * 1000) / fpsElapsed;
-      const frameMs = fpsElapsed / fpsFrames;
-      fpsEl.textContent = fps.toFixed(0);
-      // 按帧率着色：>=50 绿，>=30 黄，<30 红
-      fpsEl.style.color = fps >= 50 ? "#7CFC00" : fps >= 30 ? "#FFD700" : "#FF6B6B";
-      frameTimeEl.textContent = `(${frameMs.toFixed(1)} ms/帧)`;
-      // HUD 随 FPS 统计同频刷新（500ms）：消除每帧 5 次 DOM 写导致的布局抖动
-      updateHUD(
-        crs.name,
-        mapController.controls.target.x,
-        mapController.controls.target.y,
-        mapController.resolution,
-        engine.tileManager.loadedTiles.size,
-        engine.tileManager.scheduler.queueLength,
-        engine.tileManager.scheduler.loadingCount,
-      );
-      fpsFrames = 0;
-      fpsLastTime = fpsNow;
-    }
+    const now = performance.now();
 
     // Sync crosshair to controls target（CRS 坐标，相对 worldRoot）
     // z 保持 90（抬离地面避免与瓦片平面 z-fighting），并按分辨率动态缩放保持固定屏幕尺寸。
+    // 纯 CPU 赋值，不触发 GPU 绘制；渲染恢复时准星必然已就位。
     const tgt = mapController.controls.target;
     crosshair.position.set(tgt.x, tgt.y, 90);
     const crosshairScale = Math.max(mapController.resolution, 1) * 0.9; // ≈14px 半长
     crosshair.scale.setScalar(crosshairScale);
 
     // Sync tile meshes（worldRoot.position = -origin）：100ms 节流（与引擎
-    // UPDATE_INTERVAL_MS 对齐）。syncScene 的结构性遍历在调度停顿期间结果不变，
-    // 无需每帧执行；新瓦片出现 ≤100ms 延迟，观感不可察觉。淡入/淡出动画每帧推进。
-    const syncNow = performance.now();
-    if (syncNow - lastSyncTs >= 100) {
-      syncScene();
-      lastSyncTs = syncNow;
+    // UPDATE_INTERVAL_MS 对齐）。render-on-demand：syncScene 结构性遍历在调度
+    // 停顿期间结果不变，无需每帧执行；仅当它实际改变了场景图（新增/移除/补挂
+    // 瓦片）才请求渲染。静止时返回 false → GPU 保持空闲。
+    if (now - lastSyncTs >= 100) {
+      lastSyncTs = now;
+      if (syncScene()) needsRender = true;
     }
 
-    // 图层显隐控制：根据 layerVisibility 设置每个 group 的 visible
+    // 图层显隐控制：根据 layerVisibility 设置每个 group 的 visible。
+    // 显隐状态变化（用户勾选图层 checkbox）需触发重绘。
     for (const [, group] of sceneTiles) {
       const layerIds: string[] | undefined = (group as any).__layerIds;
       if (!layerIds) continue;
       // 只要 group 中有一个 layer 是可见的，就显示该 group
-      group.visible = layerIds.some((lid) => layerVisibility.get(lid) !== false);
+      const newVis = layerIds.some((lid) => layerVisibility.get(lid) !== false);
+      if (group.visible !== newVis) {
+        group.visible = newVis;
+        needsRender = true;
+      }
     }
 
-    // 渲染瞬间将相机临时偏移到局部坐标（相机平时在 CRS 坐标，OrbitControls 不受影响）。
-    // 相机与 worldRoot 子节点（瓦片/准星）同处局部坐标系，相对视图正确；
-    // 平移不改变朝向，故 OrbitControls 计算的 quaternion 无需调整。
-    const origin = engine.floatingOrigin.current;
-    camera.position.x -= origin.x;
-    camera.position.y -= origin.y;
-    renderer.render(scene, camera);
-    camera.position.x += origin.x;
-    camera.position.y += origin.y;
-
-    // 标准深度缓冲的自适应 near/far：near 随相机距离放大、far 随距离收窄，
-    // 保证任意缩放级别下 z-buffer 不塌缩（替代对数深度缓冲）。
-    // 需在相机位置从浮动原点偏移恢复后计算，距离才与 target 同坐标系。
+    // 自适应 near/far + 相机移动检测（每帧，用还原后的 CRS 坐标）。
+    // near/far 更新仅改投影矩阵，不触发 GPU 绘制。
     const camDist = camera.position.distanceTo(mapController.controls.target);
     const near = Math.min(Math.max(camDist / 5000, 10), 1e5);
     const far = Math.min(Math.max(camDist * 100, 5e5), 1e8);
@@ -801,15 +802,32 @@ async function main() {
       camera.updateProjectionMatrix();
     }
 
+    const ddx = camera.position.x - lastCamPos.x;
+    const ddy = camera.position.y - lastCamPos.y;
+    // 移动阈值（旋转/平移检测）：移动期间跳过淡入推进，直接置满透明度，
+    // 否则旋转扫掠时新进入视野的瓦片逐帧淡入 → 随相机移动的亮度条带。
+    const camMoved =
+      Math.abs(ddx) > camDist * 0.0005 || Math.abs(ddy) > camDist * 0.0005;
+    // render-on-demand：任何 >1cm 的相机位移都要重绘（阈值远小于视野，避免
+    // 慢速拖拽时逐帧低于 camMoved 阈值而冻结画面）。
+    const cameraChanged = Math.abs(ddx) > 0.01 || Math.abs(ddy) > 0.01;
+    lastCamPos.x = camera.position.x;
+    lastCamPos.y = camera.position.y;
+    lastCamPos.z = camera.position.z;
+    if (cameraChanged) needsRender = true;
+
     // ── Fade-in animation (300ms) — 仅用于「平移进入的新区域」瓦片；
     // LOD 切换的替换瓦片跳过淡入满透明度上屏（见 syncScene replacesEvicted）。
+    // 存在活动淡入时才逐帧推进并请求渲染，否则零开销。
+    // camMoved 时所有未完成淡入的瓦片直接置满透明度（done=true）。
     const FADE_DURATION = 300;
-    const now = performance.now();
+    let fadeActive = false;
     for (const [, group] of sceneTiles) {
       const start: number | undefined = (group as any).__fadeStart;
       if (start == null) continue;
+      fadeActive = true;
       const elapsed = now - start;
-      const done = elapsed >= FADE_DURATION;
+      const done = elapsed >= FADE_DURATION || camMoved;
       const progress = done ? 1 : Math.min(1, elapsed / FADE_DURATION);
 
       forEachMaterial(group, (mat) => {
@@ -826,6 +844,58 @@ async function main() {
       });
 
       if (done) delete (group as any).__fadeStart;
+    }
+    if (fadeActive) needsRender = true;
+
+    // 实际绘制（dirty 驱动）：空闲（相机未动、无加载、无淡入）时跳过
+    // renderer.render → GPU 完全空闲。worldRoot 与相机必须同帧使用同一 origin
+    // （F1 防抖）——仅渲染时同步即可。
+    if (needsRender) {
+      // 渲染瞬间将相机临时偏移到局部坐标（相机平时在 CRS 坐标，OrbitControls 不受影响）。
+      // 相机与 worldRoot 子节点（瓦片/准星）同处局部坐标系，相对视图正确；
+      // 平移不改变朝向，故 OrbitControls 计算的 quaternion 无需调整。
+      const origin = engine.floatingOrigin.current;
+      camera.position.x -= origin.x;
+      camera.position.y -= origin.y;
+      worldRoot.position.set(-origin.x, -origin.y, 0);
+      renderer.render(scene, camera);
+      camera.position.x += origin.x;
+      camera.position.y += origin.y;
+      needsRender = false;
+      lastRenderTs = performance.now();
+      fpsFrames++;
+    }
+
+    // ── FPS 统计 ─────────────────────────────────────────
+    // 空闲（超过 500ms 无实际绘制）时显示 "FPS: idle"，避免误读为 0。
+    const fpsNow = performance.now();
+    const fpsElapsed = fpsNow - fpsLastTime;
+    if (fpsElapsed >= 500) {
+      const idle = fpsNow - lastRenderTs > 500;
+      if (idle) {
+        fpsEl.textContent = "idle";
+        fpsEl.style.color = "#888888";
+        frameTimeEl.textContent = "";
+      } else {
+        const fps = (fpsFrames * 1000) / fpsElapsed;
+        const frameMs = fpsElapsed / Math.max(fpsFrames, 1);
+        fpsEl.textContent = fps.toFixed(0);
+        // 按帧率着色：>=50 绿，>=30 黄，<30 红
+        fpsEl.style.color = fps >= 50 ? "#7CFC00" : fps >= 30 ? "#FFD700" : "#FF6B6B";
+        frameTimeEl.textContent = `(${frameMs.toFixed(1)} ms/帧)`;
+      }
+      // HUD 随 FPS 统计同频刷新（500ms）：消除每帧 5 次 DOM 写导致的布局抖动
+      updateHUD(
+        crs.name,
+        mapController.controls.target.x,
+        mapController.controls.target.y,
+        mapController.resolution,
+        engine.tileManager.loadedTiles.size,
+        engine.tileManager.scheduler.queueLength,
+        engine.tileManager.scheduler.loadingCount,
+      );
+      fpsFrames = 0;
+      fpsLastTime = fpsNow;
     }
 
     requestAnimationFrame(render);

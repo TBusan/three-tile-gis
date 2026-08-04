@@ -52,9 +52,10 @@ describe("SkirtedMesh", () => {
     expect(pos.getZ(9)).toBeCloseTo(20, 5);
   });
 
-  it("should clamp gridSize to [2, 16]", () => {
+  it("should clamp gridSize to [2, 64]", () => {
     expect(new SkirtedMesh(() => 0, 1).gridSize).toBe(2);
-    expect(new SkirtedMesh(() => 0, 20).gridSize).toBe(16);
+    expect(new SkirtedMesh(() => 0, 20).gridSize).toBe(20);
+    expect(new SkirtedMesh(() => 0, 65).gridSize).toBe(64);
   });
 
   it("should compute vertex normals including skirts", () => {

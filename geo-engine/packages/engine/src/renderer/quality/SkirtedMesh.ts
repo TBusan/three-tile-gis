@@ -24,7 +24,7 @@ export class SkirtedMesh implements IQualityTier {
 
   /**
    * @param getElevation — 高程采样回调（CRS 坐标 → 米）
-   * @param gridSize — 细分密度（2–16，默认 4）
+   * @param gridSize — 细分密度（2–64，默认 4）
    * @param skirtHeight — 裙边深度（米，默认 100）
    */
   constructor(
@@ -33,7 +33,7 @@ export class SkirtedMesh implements IQualityTier {
     skirtHeight: number = 100,
   ) {
     this._getElevation = getElevation;
-    this.gridSize = Math.max(2, Math.min(16, Math.floor(gridSize)));
+    this.gridSize = Math.max(2, Math.min(64, Math.floor(gridSize)));
     this._skirtHeight = skirtHeight;
   }
 

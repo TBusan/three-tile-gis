@@ -79,6 +79,31 @@ function makeMockLayer(
   };
 }
 
+/**
+ * 反复调用 update() 排空调度队列，直到条件满足或达到最大轮数。
+ *
+ * update() 同步执行调度并触发异步 _loadTile（不 await）；每轮先 update 再
+ * setTimeout(5ms) 让在途加载的微任务落定，随后检查条件。extentChanged 在首轮后
+ * 变为 false，但 takeNext() 每帧都会消费队列，因此同 extent 的反复 update 能
+ * 逐步排空批次（每帧 8/4 个）直到所有可见瓦片加载完成。
+ */
+async function drainUpdates(
+  mgr: TileManager,
+  extent: CrsBounds,
+  cameraPos: { x: number; y: number; z: number },
+  crs: IProjectCRS,
+  layer: ILayer,
+  until: (mgr: TileManager) => boolean,
+  maxLoops = 200,
+): Promise<void> {
+  for (let i = 0; i < maxLoops; i++) {
+    mgr.update(extent, cameraPos, crs, [layer]);
+    await new Promise((r) => setTimeout(r, 5));
+    if (until(mgr)) return;
+  }
+  throw new Error("drainUpdates: condition not satisfied within maxLoops");
+}
+
 describe("TileManager", () => {
   let cache: LRUTileCache<Tile>;
   let origin: FloatingOrigin;
@@ -638,8 +663,12 @@ describe("TileManager", () => {
       timeout: 1000,
     });
 
-    // 瓦片离开视野 → abort → loadFn 放行返回 null
+    // 瓦片离开视野 → 300ms 宽限期后 abort → loadFn 放行返回 null。
+    // 第一次 update 只记录离开时刻（宽限期保护，防旋转时 abort/重建循环）；
+    // 等待超过宽限期后再 update 才真正 abort。
     layer.getVisibleTiles = () => [];
+    mgr.update([-2000, -2000, 2000, 2000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    await new Promise((r) => setTimeout(r, 350));
     mgr.update([-2000, -2000, 2000, 2000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
     await vi.waitFor(() => expect(mgr.scheduler.loadingCount).toBe(0), {
       timeout: 1000,
@@ -779,8 +808,11 @@ describe("TileManager", () => {
       timeout: 1000,
     });
 
-    // 瓦片离开视野 → 取消加载（AbortError）
+    // 瓦片离开视野 → 300ms 宽限期后取消加载（AbortError）。
+    // 第一次 update 只记录离开时刻；等待超过宽限期后再 update 才真正 abort。
     visible = [];
+    mgr.update([-2000, -2000, 2000, 2000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    await new Promise((r) => setTimeout(r, 350));
     mgr.update([-2000, -2000, 2000, 2000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
 
     // 取消不算失败：状态回到 unloaded、failCount 保持 0（不会触发拉黑）
@@ -1106,5 +1138,532 @@ describe("TileManager", () => {
 
     expect(mgr.loadedTiles.size).toBe(0);
     expect(cache.count).toBe(0);
+  });
+
+  it("resetScheme 后相机未动也必须重新请求瓦片（extentChanged 优化不得跳过调度）", async () => {
+    const mgr = new TileManager(cache, origin, async (_tile, layer) => {
+      const tc = new TileContent(
+        `tc-${layer.id}-${_tile.key.id}`,
+        _tile.key,
+        layer.id,
+      );
+      tc.state = "ready";
+      return tc;
+    });
+
+    const key = makeTileKey("xyz", "0-0", 0);
+    const layer = makeMockLayer("Lxyz", "xyz", [key]);
+    const extent: CrsBounds = [-1000, -1000, 1000, 1000];
+    const cam = { x: 0, y: 0, z: 0 };
+    // 必须传 resolution：extentChanged 守卫要求 _lastExtent 与 _lastResolution
+    // 同时非空才启用「视野未变跳过调度」优化；不传则守卫永不生效，测试无法复现 bug。
+    const resolution = 10;
+
+    // 第一次调度：加载
+    mgr.update(extent, cam, mockCRS, [layer], resolution);
+    await vi.waitFor(() => expect(mgr.loadedTiles.has("xyz:0-0")).toBe(true), {
+      timeout: 1000,
+    });
+
+    // 底图切换：清除 xyz 全部状态
+    mgr.resetScheme("xyz");
+    expect(mgr.loadedTiles.size).toBe(0);
+
+    // 相机未动、视野与分辨率完全相同：再次 update 必须重新生成请求并加载。
+    // 回归：resetScheme 若不同步清空 _lastExtent，这里 extentChanged=false，
+    // 调度块被跳过 → 新底图瓦片永不加载（0 queued / 0 loading，底图空白）。
+    mgr.update(extent, cam, mockCRS, [layer], resolution);
+    await vi.waitFor(() => expect(mgr.loadedTiles.has("xyz:0-0")).toBe(true), {
+      timeout: 1000,
+    });
+  });
+
+  it("相机位移但视野/分辨率未变也必须重新调度（F2 旋转触发）", () => {
+    const mgr = new TileManager(cache, origin, async () => null);
+    const key = makeTileKey("proj", "0-0", 0);
+    const layer = makeMockLayer("L1", "proj", [key]);
+    const extent: CrsBounds = [-1000, -1000, 1000, 1000];
+    const camA = { x: 0, y: 0, z: 0 };
+    const resolution = 10;
+    const scheduleSpy = vi.spyOn(mgr.scheduler, "schedule");
+
+    // 第一次调度：加载
+    mgr.update(extent, camA, mockCRS, [layer], resolution);
+    expect(scheduleSpy).toHaveBeenCalledTimes(1);
+
+    // 相机未动、视野/分辨率完全相同 → extentChanged=false，跳过调度
+    mgr.update(extent, camA, mockCRS, [layer], resolution);
+    expect(scheduleSpy).toHaveBeenCalledTimes(1);
+
+    // 相机位移超过阈值（旋转时相机围绕 target 转动，位移显著）→ 必须重新调度。
+    // 回归：若只按 extent 角点位移判断，45° 梯形 AABB 旋转时角点可能 <5% 视野宽，
+    // 调度被跳过 → 新露出条带瓦片迟迟不请求。
+    const camB = { x: 500, y: 0, z: 0 }; // > max(2000,2000)*0.05 = 100
+    mgr.update(extent, camB, mockCRS, [layer], resolution);
+    expect(scheduleSpy).toHaveBeenCalledTimes(2);
+  });
+
+  it("屏幕外当前级别瓦片超龄后被淘汰；屏内当前级别瓦片保留（F5）", async () => {
+    const scheme = makeMockScheme("proj", 5); // currentZoom = 5
+    const mgr = new TileManager(cache, origin, async (tile, _layer) => {
+      const tc = new TileContent(`tc-${tile.key.id}`, tile.key, _layer.id);
+      tc.state = "ready";
+      return tc;
+    });
+    // 无可见瓦片：避免 update 的 _addKeyRequest 刷新 lastAccessTime
+    const layer = makeMockLayer("L1", "proj", [], scheme as never);
+
+    // 屏内瓦片 A：bounds [0,0,500,500]
+    const keyA = makeTileKey("proj", "0-0", 5);
+    // 屏外瓦片 B：bounds [2500,2500,3000,3000]
+    const keyB = makeTileKey("proj", "5-5", 5);
+
+    await mgr.loadTileNow(keyA, layer);
+    await mgr.loadTileNow(keyB, layer);
+
+    // 都超龄：超过 OFFSCREEN_EVICT_TIMEOUT_MS(1500)
+    const tileA = mgr.loadedTiles.get(tileKeyToString(keyA))!;
+    const tileB = mgr.loadedTiles.get(tileKeyToString(keyB))!;
+    tileA.lastAccessTime = Date.now() - 2000;
+    tileB.lastAccessTime = Date.now() - 2000;
+
+    // 视野覆盖 A 但不覆盖 B
+    mgr.update([0, 0, 1000, 1000], { x: 500, y: 500, z: 0 }, mockCRS, [layer]);
+
+    expect(mgr.loadedTiles.has(tileKeyToString(keyA))).toBe(true);
+    expect(mgr.loadedTiles.has(tileKeyToString(keyB))).toBe(false);
+  });
+
+  it("离开视野的 in-flight 瓦片 300ms 宽限期内不 abort，超时后才 abort（F6）", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const mgr = new TileManager(cache, origin, (_tile, _layer, signal) => {
+      capturedSignal = signal;
+      return new Promise<TileContent | null>((_res, rej) => {
+        signal.addEventListener("abort", () =>
+          rej(Object.assign(new Error("aborted"), { name: "AbortError" })),
+        );
+      });
+    });
+    const key = makeTileKey("proj", "0-0", 0);
+    const layer = makeMockLayer("L1", "proj", []);
+    let visible: TileKey[] = [];
+    layer.getVisibleTiles = () => visible;
+    const anyMgr = mgr as unknown as { _loadingLeftView: Map<string, number> };
+
+    // 入视野 → 开始加载（挂起）
+    visible = [key];
+    mgr.update([-1000, -1000, 1000, 1000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    await vi.waitFor(() => expect(mgr.scheduler.loadingCount).toBe(1), {
+      timeout: 1000,
+    });
+
+    // 离开视野 → 宽限期内不 abort（只记录离开时刻）
+    visible = [];
+    mgr.update([-2000, -2000, 2000, 2000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    expect(capturedSignal?.aborted).toBe(false);
+    expect(mgr.scheduler.loadingCount).toBe(1);
+    expect(anyMgr._loadingLeftView.size).toBe(1);
+
+    // 超过宽限期后再 update → 真正 abort
+    await new Promise((r) => setTimeout(r, 350));
+    mgr.update([-2000, -2000, 2000, 2000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    await vi.waitFor(() => expect(mgr.scheduler.loadingCount).toBe(0), {
+      timeout: 1000,
+    });
+    expect(capturedSignal?.aborted).toBe(true);
+  });
+
+  it("离开视野的 in-flight 瓦片重新进入视野后宽限记录清除（F6）", async () => {
+    let capturedSignal: AbortSignal | undefined;
+    const mgr = new TileManager(cache, origin, (_tile, _layer, signal) => {
+      capturedSignal = signal;
+      return new Promise<TileContent | null>((_res, rej) => {
+        signal.addEventListener("abort", () =>
+          rej(Object.assign(new Error("aborted"), { name: "AbortError" })),
+        );
+      });
+    });
+    const key = makeTileKey("proj", "0-0", 0);
+    const layer = makeMockLayer("L1", "proj", []);
+    let visible: TileKey[] = [];
+    layer.getVisibleTiles = () => visible;
+    const anyMgr = mgr as unknown as { _loadingLeftView: Map<string, number> };
+
+    visible = [key];
+    mgr.update([-1000, -1000, 1000, 1000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    await vi.waitFor(() => expect(mgr.scheduler.loadingCount).toBe(1), {
+      timeout: 1000,
+    });
+
+    // 离开视野 → 记录宽限
+    visible = [];
+    mgr.update([-2000, -2000, 2000, 2000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    expect(anyMgr._loadingLeftView.size).toBe(1);
+
+    // 重新进入视野 → 宽限记录清除，加载继续
+    visible = [key];
+    mgr.update([-1000, -1000, 1000, 1000], { x: 0, y: 0, z: 0 }, mockCRS, [layer]);
+    expect(anyMgr._loadingLeftView.size).toBe(0);
+    expect(capturedSignal?.aborted).toBe(false);
+    expect(mgr.scheduler.loadingCount).toBe(1);
+  });
+
+  it("content.layerId 与 layer.id 匹配时相机移动不重复加载（缓存命中契约）", async () => {
+    let loadCount = 0;
+    // 修复后的 demo 行为：tileLoadFn 传 layer.id → content.layerId === layer.id
+    const mgr = new TileManager(cache, origin, async (tile, layer) => {
+      loadCount++;
+      const tc = new TileContent(`tc-${loadCount}`, tile.key, layer.id);
+      tc.state = "ready";
+      return tc;
+    });
+
+    const key = makeTileKey("proj", "0-0", 0);
+    const layer = makeMockLayer("L1", "proj", [key]);
+    const extent: CrsBounds = [-1000, -1000, 1000, 1000];
+    const resolution = 10;
+
+    // 第 1 次调度：加载
+    mgr.update(extent, { x: 0, y: 0, z: 0 }, mockCRS, [layer], resolution);
+    await vi.waitFor(() => expect(mgr.loadedTiles.size).toBe(1), { timeout: 1000 });
+    expect(loadCount).toBe(1);
+
+    // 相机位移 → 触发重新调度。content.layerId === layer.id →
+    // _addKeyRequest 缓存命中提前返回，不再重复 fetch/重建 content。
+    // 回归：若 layerId 不匹配（调用方漏传 layer.id），这里会再次加载（重复请求）。
+    mgr.update(extent, { x: 500, y: 0, z: 0 }, mockCRS, [layer], resolution);
+    await new Promise((r) => setTimeout(r, 50));
+    expect(loadCount).toBe(1);
+  });
+
+  it("content.layerId 与 layer.id 不匹配时重复重载不无界堆积（去重守卫）", async () => {
+    let loadCount = 0;
+    // 模拟旧 bug：调用方未传 layer.id，content.layerId 恒为 renderer 默认值
+    // "raster-layer"，与 layer.id "basemap-osm" 不匹配 → 每次视野变化都重复重载。
+    const mgr = new TileManager(cache, origin, async (tile) => {
+      loadCount++;
+      const tc = new TileContent(`tc-${loadCount}`, tile.key, "raster-layer");
+      tc.state = "ready";
+      return tc;
+    });
+
+    const key = makeTileKey("proj", "0-0", 0);
+    const layer = makeMockLayer("basemap-osm", "proj", [key]);
+    const extent: CrsBounds = [-1000, -1000, 1000, 1000];
+    const resolution = 10;
+
+    // 第 1 次调度：加载 1 份 content
+    mgr.update(extent, { x: 0, y: 0, z: 0 }, mockCRS, [layer], resolution);
+    await vi.waitFor(() => expect(mgr.loadedTiles.size).toBe(1), { timeout: 1000 });
+    expect(loadCount).toBe(1);
+    expect(mgr.loadedTiles.get("proj:0-0")!.contents.length).toBe(1);
+
+    // 相机位移 → 触发重新调度。layerId 不匹配 → 缓存命中检查失败 → 重复加载
+    //（真实 bug 的引擎侧表现）。去重守卫应把同 layerId 的重复 content 收敛到 1 份，
+    // 而不是每次重载都 push 一份（纹理/材质/网格无界泄漏）。
+    mgr.update(extent, { x: 500, y: 0, z: 0 }, mockCRS, [layer], resolution);
+    await vi.waitFor(() => expect(loadCount).toBeGreaterThanOrEqual(2), {
+      timeout: 1000,
+    });
+
+    const tile = mgr.loadedTiles.get("proj:0-0")!;
+    // 无论重复重载多少次，每个 content.layerId 最多保留 1 份
+    expect(tile.contents.length).toBe(1);
+    expect(tile.contents[0].layerId).toBe("raster-layer");
+  });
+
+  // ─────────────────────────────────────────────────────────────────────
+  // 原子 LOD 多级跳变死锁回归
+  //（用户报告：缩小加载 z4/z5 后再放大，Network 已请求高等级瓦片但图面停留低等级）
+  //
+  // 根因：旧规则「4 个直接子瓦片（z+1）全部加载才淘汰」在 _pickZoom 跳级时
+  //（如 z2→z4，z3 永不请求）永不满足 → 旧 z2 瓦片被 isTileHidden 永久钉死。
+  // 新规则「与旧瓦片相关的当前级别可见瓦片全部加载即可淘汰」（覆盖率感知）。
+  // ─────────────────────────────────────────────────────────────────────
+
+  it("多级跳变死锁回归（stale z2 路径）：z2→z4 跳级后旧 z2 瓦片被覆盖率淘汰、z4 不再隐藏", async () => {
+    const { XYZTileScheme } = await import("../../tile/XYZTileScheme");
+    const { WebMercatorCRS } = await import("../../crs/WebMercator");
+    const wm = new WebMercatorCRS();
+    const scheme = new XYZTileScheme(wm, 0, 18);
+    const mgr = new TileManager(cache, origin, async (tile, layer) => {
+      const tc = new TileContent(`tc-${tile.key.id}`, tile.key, layer.id);
+      tc.state = "ready";
+      return tc;
+    });
+    const layer: ILayer = {
+      id: "XYZ",
+      name: "XYZ basemap",
+      type: "raster",
+      visible: true,
+      opacity: 1,
+      zIndex: 0,
+      tileScheme: scheme,
+      dataSource: {
+        dataType: "xyz",
+        crs: wm,
+        bounds: [-1e9, -1e9, 1e9, 1e9] as CrsBounds,
+        fetch: async () => null,
+        dispose: () => {},
+      },
+      renderer: {
+        name: "r",
+        createContent: async (): Promise<any> => null,
+        disposeContent: () => {},
+      },
+      dependsOn: [],
+      getVisibleTiles: (extent: CrsBounds) => scheme.getTilesInView(extent, wm),
+    };
+
+    const WH = Math.PI * 6378137; // WebMercator 半世界
+    const worldExtent: CrsBounds = [-WH, -WH, WH, WH];
+    const worldCam = { x: 0, y: 0, z: 0 };
+
+    // ① 整世界视野 → _pickZoom = 2；排空直到全部 16 个 z2 瓦片加载完成
+    mgr.update(worldExtent, worldCam, wm, [layer]);
+    await drainUpdates(mgr, worldExtent, worldCam, wm, layer, (m) => {
+      return [...m.loadedTiles.values()].filter((t) => t.key.level === 2).length >= 16;
+    });
+    // 覆盖后续视口的 z2 瓦片 2/2/1（bounds [0,WH/2]²）必须已加载
+    expect(mgr.loadedTiles.has("xyz:2/2/1")).toBe(true);
+
+    // ② 缩小视口到 [0, WH/2]² → _pickZoom 直接到 z4（跳过 z3，z3 永不请求）
+    const zoomExtent: CrsBounds = [0, 0, WH / 2, WH / 2];
+    const zoomCam = { x: WH / 4, y: WH / 4, z: 0 };
+    mgr.update(zoomExtent, zoomCam, wm, [layer]);
+    expect(scheme.currentZoom).toBe(4);
+
+    const visibleZ4 = scheme.getTilesInView(zoomExtent, wm);
+    expect(visibleZ4.length).toBeGreaterThan(0);
+
+    // 视口中心 (WH/4, WH/4) 恰落在 z4 瓦片角点上 —— 浮点误差使点落于任何
+    // 单瓦片 bounds 之外。用米级容差选中心瓦片（任一匹配瓦片都是 2/2/1 的后代）。
+    const EPS = 1; // 米
+    const centerZ4 = visibleZ4.find((k) => {
+      const [bx0, by0, bx1, by1] = scheme.getTileBounds(k);
+      return (
+        bx0 - EPS <= WH / 4 && WH / 4 <= bx1 + EPS &&
+        by0 - EPS <= WH / 4 && WH / 4 <= by1 + EPS
+      );
+    });
+    expect(centerZ4).toBeDefined();
+
+    // ③ 排空直到「覆盖视口中心的 z4 瓦片」加载且不再被隐藏
+    //（其 z3 占位父已细化、z2 旧瓦片已按覆盖率淘汰 —— 正是死锁解除的充分条件）
+    await drainUpdates(mgr, zoomExtent, zoomCam, wm, layer, (m) => {
+      const t = m.loadedTiles.get(tileKeyToString(centerZ4!));
+      return t !== undefined && !m.isTileHidden(t);
+    });
+
+    // ④ 死锁解除：覆盖视口的旧 z2 瓦片被淘汰
+    expect(mgr.loadedTiles.has("xyz:2/2/1")).toBe(false);
+
+    // ⑤ 视口核心区域（bounds 完全落在 [0,WH/2]² 内，含容差）的所有 z4 瓦片
+    // 不再被隐藏（边缘瓦片的 z3 占位父可能因视口外子瓦片未加载而保留 ——
+    // 正常原子行为，不在此断言）
+    for (const k of visibleZ4) {
+      const [bx0, by0, bx1, by1] = scheme.getTileBounds(k);
+      const insideCore =
+        bx0 >= 0 - EPS && by0 >= 0 - EPS && bx1 <= WH / 2 + EPS && by1 <= WH / 2 + EPS;
+      if (!insideCore) continue;
+      const t = mgr.loadedTiles.get(tileKeyToString(k));
+      expect(t).toBeDefined();
+      expect(mgr.isTileHidden(t!)).toBe(false);
+    }
+  });
+
+  it("多级跳变死锁回归（占位父瓦片路径）：旧 z1 占位父瓦片在可见 z4 后代全部加载后被覆盖率淘汰", async () => {
+    const { XYZTileScheme } = await import("../../tile/XYZTileScheme");
+    const { WebMercatorCRS } = await import("../../crs/WebMercator");
+    const wm = new WebMercatorCRS();
+    const scheme = new XYZTileScheme(wm, 0, 18);
+    const mgr = new TileManager(cache, origin, async (tile, layer) => {
+      const tc = new TileContent(`tc-${tile.key.id}`, tile.key, layer.id);
+      tc.state = "ready";
+      return tc;
+    });
+    const layer: ILayer = {
+      id: "XYZ",
+      name: "XYZ basemap",
+      type: "raster",
+      visible: true,
+      opacity: 1,
+      zIndex: 0,
+      tileScheme: scheme,
+      dataSource: {
+        dataType: "xyz",
+        crs: wm,
+        bounds: [-1e9, -1e9, 1e9, 1e9] as CrsBounds,
+        fetch: async () => null,
+        dispose: () => {},
+      },
+      renderer: {
+        name: "r",
+        createContent: async (): Promise<any> => null,
+        disposeContent: () => {},
+      },
+      dependsOn: [],
+      getVisibleTiles: (extent: CrsBounds) => scheme.getTilesInView(extent, wm),
+    };
+
+    const WH = Math.PI * 6378137;
+
+    // 模拟「z2 视野期间注入」的状态：z1 占位父瓦片 1/1/0（NE 象限 [0,WH]²）
+    // 及其旧级别过渡瓦片 z2 2/2/1（[0,WH/2]²）。它们的 z3 中间级别子瓦片
+    // 在 z4 跳级下永远不会被请求 → 旧规则永久钉死（isTileHidden 隐藏全部 z4 后代）。
+    await mgr.loadTileNow(makeTileKey("xyz", "1/1/0", 1), layer);
+    await mgr.loadTileNow(makeTileKey("xyz", "2/2/1", 2), layer);
+    const anyMgr = mgr as unknown as { _parentPlaceholders: Set<string> };
+    anyMgr._parentPlaceholders.add("xyz:1/1/0");
+
+    // 跳级到 z4：视口 [0,WH/2]² 是 1/1/0 的子区域，也是 2/2/1 的整区域
+    const zoomExtent: CrsBounds = [0, 0, WH / 2, WH / 2];
+    const zoomCam = { x: WH / 4, y: WH / 4, z: 0 };
+    mgr.update(zoomExtent, zoomCam, wm, [layer]);
+    expect(scheme.currentZoom).toBe(4);
+
+    const visibleZ4 = scheme.getTilesInView(zoomExtent, wm);
+    const EPS = 1; // 米；视口中心落在瓦片角点，浮点误差使点在单瓦片 bounds 之外
+    const centerZ4 = visibleZ4.find((k) => {
+      const [bx0, by0, bx1, by1] = scheme.getTileBounds(k);
+      return (
+        bx0 - EPS <= WH / 4 && WH / 4 <= bx1 + EPS &&
+        by0 - EPS <= WH / 4 && WH / 4 <= by1 + EPS
+      );
+    });
+    expect(centerZ4).toBeDefined();
+
+    // 排空直到中心 z4 瓦片可见 —— 前提是旧 z1 占位父瓦片与旧 z2 瓦片均被覆盖率淘汰
+    await drainUpdates(mgr, zoomExtent, zoomCam, wm, layer, (m) => {
+      const t = m.loadedTiles.get(tileKeyToString(centerZ4!));
+      return t !== undefined && !m.isTileHidden(t);
+    });
+
+    // 占位标记清除 + 瓦片淘汰（修复的核心断言）
+    expect(anyMgr._parentPlaceholders.has("xyz:1/1/0")).toBe(false);
+    expect(mgr.loadedTiles.has("xyz:1/1/0")).toBe(false);
+    expect(mgr.loadedTiles.has("xyz:2/2/1")).toBe(false);
+
+    // 视口核心区域（含容差）的 z4 瓦片全部可见
+    for (const k of visibleZ4) {
+      const [bx0, by0, bx1, by1] = scheme.getTileBounds(k);
+      const insideCore =
+        bx0 >= 0 - EPS && by0 >= 0 - EPS && bx1 <= WH / 2 + EPS && by1 <= WH / 2 + EPS;
+      if (!insideCore) continue;
+      const t = mgr.loadedTiles.get(tileKeyToString(k));
+      expect(t).toBeDefined();
+      expect(mgr.isTileHidden(t!)).toBe(false);
+    }
+  });
+
+  it("stale 瓦片区域超出视口：仅可见子瓦片加载即淘汰（不再等待视口外的子瓦片）", async () => {
+    const mgr = new TileManager(cache, origin, async (tile, _layer, _signal) => {
+      const tc = new TileContent(`tc`, tile.key, _layer.id);
+      tc.state = "ready";
+      return tc;
+    });
+    // 方案 2 级 + 2-part "col-row" 父链：level-1 "0-0" → level-2 "0-0"/"1-0"/"0-1"/"1-1"
+    const scheme = {
+      ...makeMockScheme("proj", 2),
+      getParentKey: (key: TileKey): TileKey | null => {
+        if (key.level <= 0) return null;
+        const [col, row] = key.id.split("-").map(Number);
+        return makeTileKey("proj", `${Math.floor(col / 2)}-${Math.floor(row / 2)}`, key.level - 1);
+      },
+    } as ReturnType<typeof makeMockScheme>;
+
+    // 旧级别瓦片 level 1 "0-0"（bounds [0,0,500,500]）先加载
+    const staleKey = makeTileKey("proj", "0-0", 1);
+    await mgr.loadTileNow(staleKey, makeMockLayer("L1", "proj", [], scheme));
+
+    // 当前级别（level 2）只有 "1-1" 可见 —— 它是 stale 瓦片 bounds 内的一个子瓦片；
+    // 其余子瓦片（"0-0"/"1-0"/"0-1"）在视口外，永远不会被请求。
+    // 旧规则要求「4 个直接子瓦片全加载」→ 永不满足 → stale 瓦片永久钉死。
+    const childKey = makeTileKey("proj", "1-1", 2);
+    const layer = makeMockLayer("L1", "proj", [childKey], scheme);
+
+    mgr.update([0, 0, 1000, 1000], { x: 500, y: 500, z: 0 }, mockCRS, [layer]);
+    await vi.waitFor(
+      () => expect(mgr.loadedTiles.has(tileKeyToString(childKey))).toBe(true),
+      { timeout: 1000 },
+    );
+
+    // 再次 update 触发持续淘汰（覆盖率感知）
+    mgr.update([0, 0, 1000, 1000], { x: 500, y: 500, z: 0 }, mockCRS, [layer]);
+    await new Promise((r) => setTimeout(r, 10));
+
+    // 可见子瓦片 "1-1" 已加载 → 覆盖 → stale 瓦片被淘汰（不再等待视口外的兄弟子瓦片）
+    expect(mgr.loadedTiles.has(tileKeyToString(staleKey))).toBe(false);
+  });
+
+  it("zoom-out 多级：旧 z4 细瓦片在 z2 新级别父瓦片加载后被淘汰（即使 z3 中间级别未加载）", async () => {
+    const { XYZTileScheme } = await import("../../tile/XYZTileScheme");
+    const { WebMercatorCRS } = await import("../../crs/WebMercator");
+    const wm = new WebMercatorCRS();
+    const scheme = new XYZTileScheme(wm, 0, 18);
+    const mgr = new TileManager(cache, origin, async (tile, layer) => {
+      const tc = new TileContent(`tc-${tile.key.id}`, tile.key, layer.id);
+      tc.state = "ready";
+      return tc;
+    });
+    const layer: ILayer = {
+      id: "XYZ",
+      name: "XYZ basemap",
+      type: "raster",
+      visible: true,
+      opacity: 1,
+      zIndex: 0,
+      tileScheme: scheme,
+      dataSource: {
+        dataType: "xyz",
+        crs: wm,
+        bounds: [-1e9, -1e9, 1e9, 1e9] as CrsBounds,
+        fetch: async () => null,
+        dispose: () => {},
+      },
+      renderer: {
+        name: "r",
+        createContent: async (): Promise<any> => null,
+        disposeContent: () => {},
+      },
+      dependsOn: [],
+      getVisibleTiles: (extent: CrsBounds) => scheme.getTilesInView(extent, wm),
+    };
+
+    const WH = Math.PI * 6378137;
+    const zoomExtent: CrsBounds = [0, 0, WH / 2, WH / 2];
+    const zoomCam = { x: WH / 4, y: WH / 4, z: 0 };
+
+    // ① 初始 z4 视野（[0,WH/2]² → _pickZoom = 4），排空直到全部可见 z4 瓦片加载
+    mgr.update(zoomExtent, zoomCam, wm, [layer]);
+    expect(scheme.currentZoom).toBe(4);
+    const visibleZ4 = scheme.getTilesInView(zoomExtent, wm);
+    expect(visibleZ4.length).toBeGreaterThan(0);
+    await drainUpdates(mgr, zoomExtent, zoomCam, wm, layer, (m) => {
+      return visibleZ4.every((k) => m.loadedTiles.has(tileKeyToString(k)));
+    });
+    const z4Before = [...mgr.loadedTiles.values()].filter((t) => t.key.level === 4).length;
+    expect(z4Before).toBeGreaterThan(0);
+
+    // ② 缩小回整世界 → _pickZoom = 2（跳过 z3）。z4 瓦片变为旧级别（更细）
+    const worldExtent: CrsBounds = [-WH, -WH, WH, WH];
+    const worldCam = { x: 0, y: 0, z: 0 };
+    mgr.update(worldExtent, worldCam, wm, [layer]);
+    expect(scheme.currentZoom).toBe(2);
+
+    // ③ 排空直到 z2 覆盖视口的瓦片 2/2/1 加载且不再被隐藏（其 z1 占位父已细化）
+    await drainUpdates(mgr, worldExtent, worldCam, wm, layer, (m) => {
+      const z2Count = [...m.loadedTiles.values()].filter((t) => t.key.level === 2).length;
+      if (z2Count < 16) return false;
+      const t = m.loadedTiles.get("xyz:2/2/1");
+      return t !== undefined && !m.isTileHidden(t);
+    });
+
+    // ④ 旧 z4 细瓦片全部被淘汰（即使 z3 中间级别未加载），z2 新级别正常显示
+    const z4After = [...mgr.loadedTiles.values()].filter((t) => t.key.level === 4).length;
+    expect(z4After).toBe(0);
+    expect(mgr.loadedTiles.has("xyz:2/2/1")).toBe(true);
+    const t221 = mgr.loadedTiles.get("xyz:2/2/1")!;
+    expect(mgr.isTileHidden(t221)).toBe(false);
   });
 });
