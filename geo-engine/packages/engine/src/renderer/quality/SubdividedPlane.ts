@@ -137,17 +137,20 @@ export class SubdividedPlane implements IQualityTier {
     let i = 0;
     for (let row = 0; row < seg; row++) {
       for (let col = 0; col < seg; col++) {
+        // 命名按纹理行（v 方向）：row 增大 → v/y 增大（向北）。
         const topLeft = row * gridW + col;
         const topRight = topLeft + 1;
         const bottomLeft = topLeft + gridW;
         const bottomRight = bottomLeft + 1;
 
-        // Triangle 1: bottomLeft → bottomRight → topRight (CCW)
+        // 两个三角形均为 XY 平面内 CCW 绕序（从 +Z 俯视），
+        // 配合 FrontSide 材质正确剔除背面。
+        // Triangle 1: topLeft → topRight → bottomRight (CCW)
         indices[i++] = topLeft;
         indices[i++] = topRight;
         indices[i++] = bottomRight;
 
-        // Triangle 2: bottomLeft → topRight → topLeft (CCW)
+        // Triangle 2: topLeft → bottomRight → bottomLeft (CCW)
         indices[i++] = topLeft;
         indices[i++] = bottomRight;
         indices[i++] = bottomLeft;

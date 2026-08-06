@@ -3,7 +3,7 @@
 import type { CrsBounds, CrsCoord } from "../core/types";
 import type { IProjectCRS } from "../crs/IProjectCRS";
 import type { TileKey } from "./TileKey";
-import { makeTileKey, tileKeyToString, tileKeyEquals } from "./TileKey";
+import { makeTileKey } from "./TileKey";
 import type { ITileScheme } from "./ITileScheme";
 
 /**

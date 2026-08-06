@@ -32,6 +32,7 @@ import {
   DefaultMaterialFactory,
   SubdividedPlane,
   PerspectiveMapController,
+  PickingManager,
   tileKeyToString,
   type IProjectCRS,
   type TileKey,
@@ -371,7 +372,6 @@ async function main() {
   });
 
   function makeBasemapLayer(kind: BasemapKind): RasterLayer {
-    debugger
     return new RasterLayer({
       id: `basemap-${kind}`,
       name: `${BASEMAPS[kind].name}底图`,
@@ -444,6 +444,31 @@ async function main() {
   });
 
   engine.start();
+
+  // ── 鼠标拾取（GPU RGB 着色器拾取，非 Raycaster）────────────────
+  // 能力由外部接线：move 走廉价地面坐标（零 GPU），click 走完整 GPU 拾取。
+  const picking = new PickingManager({
+    engine,
+    renderer,
+    scene,
+    container: app,
+    sceneRoot: worldRoot,
+    camera,
+  });
+  const pickPosEl = document.getElementById("pick-pos")!;
+  const pickInfoEl = document.getElementById("pick-info")!;
+  picking.on("move", (e) => {
+    const r = picking.getGeoAt(e.x, e.y);
+    pickPosEl.textContent = r
+      ? `${r.crs.x.toFixed(1)}, ${r.crs.y.toFixed(1)}  [${r.geo?.lon.toFixed(5)}, ${r.geo?.lat.toFixed(5)}]`
+      : "—";
+  });
+  picking.on("click", (e) => {
+    const r = picking.pick(e.x, e.y);
+    pickInfoEl.textContent = r?.object
+      ? `${r.layerId}${r.tileKey ? " " + tileKeyToString(r.tileKey) : ""} z=${r.crs.z.toFixed(1)}m`
+      : "无";
+  });
 
   // ── 场景同步 ─────────────────────────────────────────────────
   const sceneTiles = new Map<string, THREE.Group>();
@@ -786,7 +811,6 @@ async function main() {
 
   // 底图切换按钮
   document.querySelectorAll("#basemap-switcher button").forEach((btn) => {
-    debugger
     btn.addEventListener("click", () => {
       const el = btn as HTMLElement;
       switchBasemap(el.dataset.kind as BasemapKind);

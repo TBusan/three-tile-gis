@@ -31,7 +31,7 @@ export class Proj4CRS implements IProjectCRS {
    * @param defTo — 目标坐标系定义（EPSG 代码或 PROJ 串）
    */
   constructor(defFrom: string, defTo: string) {
-    this.name = defTo.startsWith("EPSG:") ? defTo : defTo;
+    this.name = defTo;
     this._wgs84ToTarget = proj4(defFrom, defTo);
     this._targetToWgs84 = proj4(defTo, defFrom);
     this.units = this._detectUnits(defTo);

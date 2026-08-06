@@ -62,6 +62,15 @@ export class XYZTileSource implements IDataSource<ImageBitmap> {
 
     // 合并 AbortSignal 和超时
     const controller = new AbortController();
+    // 外部 signal 已取消（进入前已被 abort）→ 立即中止：
+    // 已 aborted 的 signal 不会再触发 abort 事件，若不检查，本次请求会白跑全程
+    //（下载 + createImageBitmap 主线程解码），浪费带宽与主线程时间。
+    if (signal?.aborted) {
+      controller.abort();
+      const err = new Error("XYZTileSource fetch aborted");
+      err.name = "AbortError";
+      throw err;
+    }
     // 超时必须以「普通 Error」abort，而不是无参数 abort()：
     // 无参数 abort() 让 fetch 以 AbortError 拒绝，TileManager 会把 AbortError
     // 视为「取消」而非失败 → 持续超时的瓦片永远不会被计入 failCount/拉黑，

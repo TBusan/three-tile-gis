@@ -67,8 +67,9 @@ export class TileManager {
    * 平移时对持续失败的瓦片反复发请求。冷却过期后，下一次视野变化时若仍可见则
    * 自然重新入队（事件驱动，不做定时重试）。
    *
-   * 键用含 level 的 _memKey —— strKey 不含 level，跨 LOD 同 (col,row) 的
-   * ProjectTileScheme 瓦片会碰撞，冷却/空记录会误伤相邻级别的同位置瓦片。
+   * 键用 tileKeyToString（含 level）—— ProjectTileScheme 的 id 不含级别，
+   * 若键不含 level，跨 LOD 同 (col,row) 瓦片会碰撞，冷却/空记录会误伤
+   * 相邻级别的同位置瓦片。
    */
   private _failTimes = new Map<string, number>();
   /**
@@ -76,7 +77,7 @@ export class TileManager {
    *
    * 确定性空结果（如无要素的矢量瓦片返回 null）：_addKeyRequest 顶部直接跳过，
    * 避免共享瓦片下其它层成功时此层每帧被无限重试。
-   * 键同样用含 level 的 _memKey。
+   * 键同样用含 level 的 tileKeyToString。
    */
   private _nullLayers = new Map<string, Set<string>>();
   /** 上一次的视野范围（用于变化检测） */
@@ -357,6 +358,9 @@ export class TileManager {
 
     // 4. 渐进式显示：父 Tile 未加载时，插入父 Tile 请求（优先加载低分辨率）
     const parentRequests: LoadRequest[] = [];
+    // 已注入的父瓦片 key 集合：去重用 Set（O(1)）替代对 parentRequests 的
+    // 线性扫描（原 some() 写法在多瓦片视野下是 O(n²) 的 tileKeyToString 重复计算）。
+    const injectedParents = new Set<string>();
     for (const req of requests) {
       // Find a representative layer to compute parent key
       const repLayer = layers.find((l) => l.id === req.layerIds[0]);
@@ -382,7 +386,7 @@ export class TileManager {
         !this._loadedTiles.has(parentStr) &&
         !this.cache.has(parentStr) &&
         !keyToLayerIds.has(parentStr) &&
-        !parentRequests.some((p) => tileKeyToString(p.tileKey) === parentStr) &&
+        !injectedParents.has(parentStr) &&
         !this._loading.has(parentStr)
       ) {
         const parentBounds = repLayer.tileScheme.getTileBounds(parentKey);
@@ -400,6 +404,7 @@ export class TileManager {
           screenArea: Math.min(pArea / 1e6, 1),
           inFrustum: true,
         });
+        injectedParents.add(parentStr);
         // 标记为渐进式占位父瓦片，子瓦片加载完成后自动移除
         this._parentPlaceholders.add(parentStr);
       }
@@ -932,12 +937,12 @@ export class TileManager {
   /**
    * 含 level 的内存键 — 用于 _nullLayers / _failTimes。
    *
-   * strKey（tileKeyToString）不含 level，跨 LOD 同 (col,row) 的 ProjectTileScheme
-   * 瓦片会碰撞成同一键；空/失败记录按 strKey 存储会把某级别的结论误判到
-   * 相邻级别同 (col,row) 的瓦片（不同地理范围）。
+   * tileKeyToString 已含 level（`${schemeId}:${id}@${level}`），
+   * 跨 LOD 同 (col,row) 的 ProjectTileScheme 瓦片不会碰撞；
+   * 本方法保留为语义别名，便于调用点表达「按含级别的键存取」意图。
    */
   private static _memKey(key: TileKey): string {
-    return `${tileKeyToString(key)}@${key.level}`;
+    return tileKeyToString(key);
   }
 
   /** 拓扑排序图层列表：无依赖的优先，依赖其他图层的在后 */
@@ -981,16 +986,14 @@ export class TileManager {
       const tile = this._loadedTiles.get(strKey)!;
       tile.lastAccessTime = Date.now();
       if (tile.contents.some((c) => c.layerId === layer.id)) return;
-      // 该 layer 已确认在此 tile 无内容（返回 null）→ 跳过，避免共享瓦片下无限重试
-      if (this._nullLayers.get(memKey)?.has(layer.id)) return;
       // 该 layer 未贡献 content 到已存在的 tile，继续添加请求
+      //（「该 layer 已确认空」已在方法顶部用 _nullLayers 拦截，此处无需重复检查）
     }
     if (this.cache.has(strKey)) {
       const tile = this.cache.get(strKey)!;
       this._loadedTiles.set(strKey, tile);
       tile.lastAccessTime = Date.now();
       if (tile.contents.some((c) => c.layerId === layer.id)) return;
-      if (this._nullLayers.get(memKey)?.has(layer.id)) return;
       // 该 layer 未贡献 content，继续添加请求
     }
 
@@ -1209,27 +1212,29 @@ export class TileManager {
   private _estimateBytes(tile: Tile): number {
     let bytes = 1024; // Tile 元数据
     for (const content of tile.contents) {
+      // 逐 content 统计，每份至少 4KB（覆盖小纹理/少量矢量要素场景），
+      // 避免多 content 瓦片的总估算被单一全局下限压低 → LRU 预算失真。
+      let contentBytes = 0;
       for (const ro of content.renderObjects) {
         const obj = ro.object as any;
         if (obj?.geometry) {
           // 估算 geometry 占用：position + uv + index
           const posAttr = obj.geometry.getAttribute?.("position");
           if (posAttr) {
-            bytes += posAttr.array.byteLength;
+            contentBytes += posAttr.array.byteLength;
             const uvAttr = obj.geometry.getAttribute?.("uv");
-            if (uvAttr) bytes += uvAttr.array.byteLength;
+            if (uvAttr) contentBytes += uvAttr.array.byteLength;
             const idx = obj.geometry.getIndex?.();
-            if (idx) bytes += idx.array.byteLength;
+            if (idx) contentBytes += idx.array.byteLength;
           }
         }
         if (obj?.material?.map?.image) {
           // 纹理估算：width * height * 4 bytes (RGBA)
           const img = obj.material.map.image;
-          bytes += (img.width ?? 256) * (img.height ?? 256) * 4;
+          contentBytes += (img.width ?? 256) * (img.height ?? 256) * 4;
         }
       }
-      // 最低保底：每个 content 至少 4KB（覆盖小纹理场景）
-      bytes = Math.max(bytes, 4096);
+      bytes += Math.max(contentBytes, 4096);
     }
     return bytes;
   }

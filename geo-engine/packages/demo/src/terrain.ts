@@ -27,6 +27,7 @@ import {
   RGBTerrainSource,
   TerrainRenderer,
   PerspectiveMapController,
+  PickingManager,
   tileKeyToString,
   type IDataSource,
   type TerrainOverlayData,
@@ -260,6 +261,31 @@ async function main() {
 
   engine.start();
 
+  // ── 鼠标拾取（GPU RGB 着色器拾取，非 Raycaster）────────────────
+  // 能力由外部接线：move 走廉价地面坐标（零 GPU），click 走完整 GPU 拾取。
+  // 地形 DEM 面命中 → crs.z 为曲面高程（深度重建），区别于地面 z=0 回退。
+  const picking = new PickingManager({
+    engine,
+    renderer,
+    scene,
+    container: app,
+    sceneRoot: worldRoot,
+    camera,
+  });
+  const pickPosEl = document.getElementById("pick-pos")!;
+  const pickInfoEl = document.getElementById("pick-info")!;
+  picking.on("move", (e) => {
+    const r = picking.getGeoAt(e.x, e.y);
+    pickPosEl.textContent = r
+      ? `${r.crs.x.toFixed(1)}, ${r.crs.y.toFixed(1)}  [${r.geo?.lon.toFixed(5)}, ${r.geo?.lat.toFixed(5)}]`
+      : "—";
+  });
+  picking.on("click", (e) => {
+    const r = picking.pick(e.x, e.y);
+    pickInfoEl.textContent = r?.object
+      ? `${r.layerId}${r.tileKey ? " " + tileKeyToString(r.tileKey) : ""} z=${r.crs.z.toFixed(1)}m${r.isSurfaceHit ? " (曲面)" : ""}`
+      : "无";
+  });
   // ── 场景同步 ─────────────────────────────────────────────────
   const sceneTiles = new Map<string, THREE.Group>();
 

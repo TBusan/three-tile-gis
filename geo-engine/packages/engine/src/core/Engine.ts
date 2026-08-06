@@ -185,6 +185,10 @@ export class Engine {
    *
    * 使用正交相机参数做反向映射，用于鼠标点击拾取等场景。
    *
+   * 注意：仅适用于正交相机（或透视相机的正俯视近似，无倾斜/无透视收缩）。
+   * 透视倾斜视角下的屏幕→地面映射请用 PickingManager.getGeoAt
+   *（射线与 z=0 平面求交，透视正确）。
+   *
    * @param camera — 正交相机 frustum（left, right, top, bottom）
    * @param pointer — 屏幕像素坐标 (0, 0 = 左上角)
    * @param containerWidth — 容器宽度（像素）

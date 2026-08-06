@@ -9,3 +9,4 @@ export * from "./layer";
 export * from "./manager";
 export * from "./worker";
 export * from "./camera";
+export * from "./picking";

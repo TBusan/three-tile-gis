@@ -21,12 +21,19 @@ export function makeTileKey(
   return { schemeId, id, level };
 }
 
-/** 比较两个 TileKey 是否相等 */
+/** 比较两个 TileKey 是否相等（schemeId + id + level 全同才算同一瓦片） */
 export function tileKeyEquals(a: TileKey, b: TileKey): boolean {
-  return a.schemeId === b.schemeId && a.id === b.id;
+  return a.schemeId === b.schemeId && a.id === b.id && a.level === b.level;
 }
 
-/** TileKey 的字符串表示（用于 Map key） */
+/**
+ * TileKey 的字符串表示（用于 Map key）
+ *
+ * 必须含 level：ProjectTileScheme 的 id 为 "col-row"（不含级别），
+ * 不同级别同 (col,row) 的瓦片地理范围不同（级别每 +1 瓦片尺寸加倍）。
+ * 若不含 level，跨级别瓦片在 _loadedTiles / cache / _loading 中碰撞成同一键
+ * → 缩放换级时命中错误瓦片（内容错乱或区域空白）。
+ */
 export function tileKeyToString(key: TileKey): string {
-  return `${key.schemeId}:${key.id}`;
+  return `${key.schemeId}:${key.id}@${key.level}`;
 }

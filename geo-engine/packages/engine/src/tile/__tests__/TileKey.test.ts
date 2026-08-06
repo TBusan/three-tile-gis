@@ -24,6 +24,13 @@ describe("TileKey", () => {
 
   it("should stringify for Map key", () => {
     const key = makeTileKey("proj", "abc", 0);
-    expect(tileKeyToString(key)).toBe("proj:abc");
+    expect(tileKeyToString(key)).toBe("proj:abc@0");
+  });
+
+  it("should stringify with level to avoid cross-level collision", () => {
+    const a = makeTileKey("proj", "3-5", 0);
+    const b = makeTileKey("proj", "3-5", 1);
+    expect(tileKeyToString(a)).not.toBe(tileKeyToString(b));
+    expect(tileKeyEquals(a, b)).toBe(false);
   });
 });

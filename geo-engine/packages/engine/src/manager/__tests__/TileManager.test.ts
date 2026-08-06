@@ -1099,10 +1099,10 @@ describe("TileManager", () => {
     mgr.resetScheme("xyz");
 
     // 其它 scheme 的瓦片保留，xyz 全部清除（loaded + cache）
-    expect(mgr.loadedTiles.has("proj:0-0")).toBe(true);
-    expect(mgr.loadedTiles.has("xyz:0-0")).toBe(false);
-    expect(cache.has("proj:0-0")).toBe(true);
-    expect(cache.has("xyz:0-0")).toBe(false);
+    expect(mgr.loadedTiles.has("proj:0-0@0")).toBe(true);
+    expect(mgr.loadedTiles.has("xyz:0-0@0")).toBe(false);
+    expect(cache.has("proj:0-0@0")).toBe(true);
+    expect(cache.has("xyz:0-0@0")).toBe(false);
   });
 
   it("resetScheme：abort 在途加载 + 代际守卫丢弃 reset 之后完成的旧代结果", async () => {
@@ -1161,7 +1161,7 @@ describe("TileManager", () => {
 
     // 第一次调度：加载
     mgr.update(extent, cam, mockCRS, [layer], resolution);
-    await vi.waitFor(() => expect(mgr.loadedTiles.has("xyz:0-0")).toBe(true), {
+    await vi.waitFor(() => expect(mgr.loadedTiles.has("xyz:0-0@0")).toBe(true), {
       timeout: 1000,
     });
 
@@ -1173,7 +1173,7 @@ describe("TileManager", () => {
     // 回归：resetScheme 若不同步清空 _lastExtent，这里 extentChanged=false，
     // 调度块被跳过 → 新底图瓦片永不加载（0 queued / 0 loading，底图空白）。
     mgr.update(extent, cam, mockCRS, [layer], resolution);
-    await vi.waitFor(() => expect(mgr.loadedTiles.has("xyz:0-0")).toBe(true), {
+    await vi.waitFor(() => expect(mgr.loadedTiles.has("xyz:0-0@0")).toBe(true), {
       timeout: 1000,
     });
   });
@@ -1356,7 +1356,7 @@ describe("TileManager", () => {
     mgr.update(extent, { x: 0, y: 0, z: 0 }, mockCRS, [layer], resolution);
     await vi.waitFor(() => expect(mgr.loadedTiles.size).toBe(1), { timeout: 1000 });
     expect(loadCount).toBe(1);
-    expect(mgr.loadedTiles.get("proj:0-0")!.contents.length).toBe(1);
+    expect(mgr.loadedTiles.get("proj:0-0@0")!.contents.length).toBe(1);
 
     // 相机位移 → 触发重新调度。layerId 不匹配 → 缓存命中检查失败 → 重复加载
     //（真实 bug 的引擎侧表现）。去重守卫应把同 layerId 的重复 content 收敛到 1 份，
@@ -1366,7 +1366,7 @@ describe("TileManager", () => {
       timeout: 1000,
     });
 
-    const tile = mgr.loadedTiles.get("proj:0-0")!;
+    const tile = mgr.loadedTiles.get("proj:0-0@0")!;
     // 无论重复重载多少次，每个 content.layerId 最多保留 1 份
     expect(tile.contents.length).toBe(1);
     expect(tile.contents[0].layerId).toBe("raster-layer");
@@ -1425,7 +1425,7 @@ describe("TileManager", () => {
       return [...m.loadedTiles.values()].filter((t) => t.key.level === 2).length >= 16;
     });
     // 覆盖后续视口的 z2 瓦片 2/2/1（bounds [0,WH/2]²）必须已加载
-    expect(mgr.loadedTiles.has("xyz:2/2/1")).toBe(true);
+    expect(mgr.loadedTiles.has("xyz:2/2/1@2")).toBe(true);
 
     // ② 缩小视口到 [0, WH/2]² → _pickZoom 直接到 z4（跳过 z3，z3 永不请求）
     const zoomExtent: CrsBounds = [0, 0, WH / 2, WH / 2];
@@ -1456,7 +1456,7 @@ describe("TileManager", () => {
     });
 
     // ④ 死锁解除：覆盖视口的旧 z2 瓦片被淘汰
-    expect(mgr.loadedTiles.has("xyz:2/2/1")).toBe(false);
+    expect(mgr.loadedTiles.has("xyz:2/2/1@2")).toBe(false);
 
     // ⑤ 视口核心区域（bounds 完全落在 [0,WH/2]² 内，含容差）的所有 z4 瓦片
     // 不再被隐藏（边缘瓦片的 z3 占位父可能因视口外子瓦片未加载而保留 ——
@@ -1514,7 +1514,7 @@ describe("TileManager", () => {
     await mgr.loadTileNow(makeTileKey("xyz", "1/1/0", 1), layer);
     await mgr.loadTileNow(makeTileKey("xyz", "2/2/1", 2), layer);
     const anyMgr = mgr as unknown as { _parentPlaceholders: Set<string> };
-    anyMgr._parentPlaceholders.add("xyz:1/1/0");
+    anyMgr._parentPlaceholders.add("xyz:1/1/0@1");
 
     // 跳级到 z4：视口 [0,WH/2]² 是 1/1/0 的子区域，也是 2/2/1 的整区域
     const zoomExtent: CrsBounds = [0, 0, WH / 2, WH / 2];
@@ -1540,9 +1540,9 @@ describe("TileManager", () => {
     });
 
     // 占位标记清除 + 瓦片淘汰（修复的核心断言）
-    expect(anyMgr._parentPlaceholders.has("xyz:1/1/0")).toBe(false);
-    expect(mgr.loadedTiles.has("xyz:1/1/0")).toBe(false);
-    expect(mgr.loadedTiles.has("xyz:2/2/1")).toBe(false);
+    expect(anyMgr._parentPlaceholders.has("xyz:1/1/0@1")).toBe(false);
+    expect(mgr.loadedTiles.has("xyz:1/1/0@1")).toBe(false);
+    expect(mgr.loadedTiles.has("xyz:2/2/1@2")).toBe(false);
 
     // 视口核心区域（含容差）的 z4 瓦片全部可见
     for (const k of visibleZ4) {
@@ -1655,15 +1655,15 @@ describe("TileManager", () => {
     await drainUpdates(mgr, worldExtent, worldCam, wm, layer, (m) => {
       const z2Count = [...m.loadedTiles.values()].filter((t) => t.key.level === 2).length;
       if (z2Count < 16) return false;
-      const t = m.loadedTiles.get("xyz:2/2/1");
+      const t = m.loadedTiles.get("xyz:2/2/1@2");
       return t !== undefined && !m.isTileHidden(t);
     });
 
     // ④ 旧 z4 细瓦片全部被淘汰（即使 z3 中间级别未加载），z2 新级别正常显示
     const z4After = [...mgr.loadedTiles.values()].filter((t) => t.key.level === 4).length;
     expect(z4After).toBe(0);
-    expect(mgr.loadedTiles.has("xyz:2/2/1")).toBe(true);
-    const t221 = mgr.loadedTiles.get("xyz:2/2/1")!;
+    expect(mgr.loadedTiles.has("xyz:2/2/1@2")).toBe(true);
+    const t221 = mgr.loadedTiles.get("xyz:2/2/1@2")!;
     expect(mgr.isTileHidden(t221)).toBe(false);
   });
 });
